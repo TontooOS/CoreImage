@@ -1,0 +1,16 @@
+{
+  "err_io": "E/A-Fehler",
+  "err_decode": "Dekodierfehler",
+  "err_encode": "Kodierfehler",
+  "err_invalid": "Ungueltige Eingabe",
+  "err_unsupported": "Nicht unterstuetzte Operation",
+  "err_font": "Schriftfehler",
+  "err_icon": "Symbolfehler",
+  "invalid_pixel_len": "Pixelpuffer passt nicht zu den Massen",
+  "invalid_size": "Breite und Hoehe muessen > 0 sein",
+  "invalid_crop": "Zuschneidebereich ausserhalb des Bildes",
+  "invalid_quality": "Qualitaet muss 1..=100 sein",
+  "unknown_format": "unbekanntes Bildformat",
+  "empty_image": "Bildpuffer ist leer",
+  "text_empty": "Text darf nicht leer sein"
+}

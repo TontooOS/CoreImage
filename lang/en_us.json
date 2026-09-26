@@ -1,0 +1,16 @@
+{
+  "err_io": "I/O error",
+  "err_decode": "Decode error",
+  "err_encode": "Encode error",
+  "err_invalid": "Invalid input",
+  "err_unsupported": "Unsupported operation",
+  "err_font": "Font error",
+  "err_icon": "Icon error",
+  "invalid_pixel_len": "pixel buffer length does not match dimensions",
+  "invalid_size": "width and height must be > 0",
+  "invalid_crop": "crop rectangle is out of bounds",
+  "invalid_quality": "quality must be 1..=100",
+  "unknown_format": "unknown image format",
+  "empty_image": "image buffer is empty",
+  "text_empty": "text must not be empty"
+}

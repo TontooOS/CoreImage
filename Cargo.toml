@@ -1,0 +1,26 @@
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[package]
+name = "coreimage"
+version = "26.1.0"
+edition = "2021"
+authors = ["arlomu"]
+description = "Image loading, transform, filter, composite and analysis library for TontooOS (CoreIcon + CoreText integrated)"
+license = "TCL"
+repository = "https://github.com/TontooOS/CoreImage"
+keywords = ["tontoo", "image", "png", "jpeg", "webp", "filter"]
+categories = ["multimedia", "graphics"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = { version = "0.25", features = ["png", "jpeg", "gif", "webp", "bmp"] }
+imageproc = "0.25"
+ab_glyph = "0.2"
+kamadak-exif = "0.5"
+coreicon = { package = "coreicon", path = "../CoreIcon" }
+coretext = { package = "coretext", path = "../CoreText" }
+
+[dev-dependencies]
+tempfile = "3"
