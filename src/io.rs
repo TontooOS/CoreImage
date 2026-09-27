@@ -1,8 +1,8 @@
 //! Loading, saving, byte buffers and metadata.
 //!
 //! Supported formats: PNG, JPEG, GIF, BMP, WebP.
-//! PNG uses the pure-Rust codec in `crate::codecs::png` (no
-//! third-party code); JPEG, GIF, BMP and WebP still decode/encode
+//! PNG and JPEG use the pure-Rust codecs in `crate::codecs` (no
+//! third-party code); GIF, BMP and WebP still decode/encode
 //! through the `image` crate until their own codec modules land.
 //! AVIF/HEIC input returns a localized `Unsupported` error.
 
@@ -128,11 +128,27 @@ fn decode_png(bytes: &[u8]) -> Result<TiImage, ImageError> {
     Ok(img)
 }
 
+/// Decode JPEG bytes with the pure-Rust codec.
+fn decode_jpeg(bytes: &[u8]) -> Result<TiImage, ImageError> {
+    let d = crate::codecs::jpeg::decode(bytes).map_err(|e| match e {
+        crate::codecs::jpeg::JpegError::Unsupported(m) => ImageError::Unsupported(m),
+        other => ImageError::Decode(other.to_string()),
+    })?;
+    let buf = crate::RgbaImage::from_raw(d.width, d.height, d.pixels)
+        .ok_or_else(|| ImageError::Decode(tr("invalid_pixel_len")))?;
+    let mut img = TiImage::from_rgba(buf);
+    img.set_format(ImageFormat::Jpeg);
+    Ok(img)
+}
+
 /// 4. Decode from a byte buffer (format auto-detected).
-/// PNG input always uses the pure-Rust codec in `crate::codecs::png`.
+/// PNG and JPEG input use the pure-Rust codecs in `crate::codecs`.
 pub fn from_bytes(bytes: &[u8]) -> Result<TiImage, ImageError> {
     if crate::codecs::png::is_png(bytes) {
         return decode_png(bytes);
+    }
+    if crate::codecs::jpeg::is_jpeg(bytes) {
+        return decode_jpeg(bytes);
     }
     let reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
@@ -160,10 +176,14 @@ pub fn from_bytes(bytes: &[u8]) -> Result<TiImage, ImageError> {
 }
 
 /// 5. Decode from a byte buffer with explicit format.
-/// `ImageFormat::Png` uses the pure-Rust codec in `crate::codecs::png`.
+/// `ImageFormat::Png` and `ImageFormat::Jpeg` use the pure-Rust
+/// codecs in `crate::codecs`.
 pub fn from_bytes_with_format(bytes: &[u8], format: ImageFormat) -> Result<TiImage, ImageError> {
     if format == ImageFormat::Png {
         return decode_png(bytes);
+    }
+    if format == ImageFormat::Jpeg {
+        return decode_jpeg(bytes);
     }
     let dynimg = image::load_from_memory_with_format(bytes, format.to_image_format())
         .map_err(|e| ImageError::Decode(e.to_string()))?;
@@ -174,11 +194,15 @@ pub fn from_bytes_with_format(bytes: &[u8], format: ImageFormat) -> Result<TiIma
 
 /// 6. Encode a buffer into bytes (quality 1-100, used for JPEG/WebP;
 /// PNG is lossless so quality is validated but has no effect).
-/// PNG output always uses the pure-Rust codec in `crate::codecs::png`.
+/// PNG and JPEG output use the pure-Rust codecs in `crate::codecs`.
 pub fn to_bytes(buf: &RgbaImage, format: ImageFormat, quality: u8) -> Result<Vec<u8>, ImageError> {
     check_quality(quality)?;
     if format == ImageFormat::Png {
         return crate::codecs::png::encode(buf.width(), buf.height(), buf.as_raw())
+            .map_err(|e| ImageError::Encode(e.to_string()));
+    }
+    if format == ImageFormat::Jpeg {
+        return crate::codecs::jpeg::encode(buf.width(), buf.height(), buf.as_raw(), quality)
             .map_err(|e| ImageError::Encode(e.to_string()));
     }
     let dynimg = DynamicImage::ImageRgba8(buf.clone());
@@ -238,7 +262,8 @@ pub fn metadata(path: &str) -> Result<ImageMetadata, ImageError> {
 }
 
 /// 10. Read metadata of a byte buffer.
-/// PNG input uses the pure-Rust IHDR probe (no full decode).
+/// PNG and JPEG input use the pure-Rust probes (no full decode);
+/// EXIF is read best-effort from the container bytes.
 pub fn metadata_from_bytes(bytes: &[u8]) -> Result<ImageMetadata, ImageError> {
     if crate::codecs::png::is_png(bytes) {
         let (w, h) = crate::codecs::png::dimensions(bytes)
@@ -254,14 +279,21 @@ pub fn metadata_from_bytes(bytes: &[u8]) -> Result<ImageMetadata, ImageError> {
             exif_exposure: None,
         });
     }
-    let reader = image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|e| ImageError::Decode(e.to_string()))?;
-    let (w, h) = reader.into_dimensions().map_err(|e| ImageError::Decode(e.to_string()))?;
+    let (w, h, format) = if crate::codecs::jpeg::is_jpeg(bytes) {
+        let (w, h) = crate::codecs::jpeg::dimensions(bytes)
+            .map_err(|e| ImageError::Decode(e.to_string()))?;
+        (w, h, Some(ImageFormat::Jpeg))
+    } else {
+        let reader = image::ImageReader::new(Cursor::new(bytes))
+            .with_guessed_format()
+            .map_err(|e| ImageError::Decode(e.to_string()))?;
+        let (w, h) = reader.into_dimensions().map_err(|e| ImageError::Decode(e.to_string()))?;
+        (w, h, ImageFormat::from_magic(bytes))
+    };
     let mut meta = ImageMetadata {
         width: w,
         height: h,
-        format: ImageFormat::from_magic(bytes),
+        format,
         color_type: "RGBA8".to_string(),
         exif_orientation: None,
         exif_date_taken: None,
