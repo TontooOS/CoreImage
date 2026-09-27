@@ -11,6 +11,8 @@
 //! All public strings and error messages resolve through `lang/en_us.json`
 //! and `lang/de_de.json` (see [`lang`]).
 
+/// Pure-Rust image codecs (PNG built-in, more formats to come).
+pub mod codecs;
 pub mod color;
 pub mod composite;
 pub mod ffi;
@@ -183,9 +185,6 @@ impl TiImage {
     }
     pub(crate) fn set_format(&mut self, format: ImageFormat) {
         self.format = Some(format);
-    }
-    pub(crate) fn buf_mut(&mut self) -> &mut RgbaImage {
-        &mut self.buf
     }
 }
 

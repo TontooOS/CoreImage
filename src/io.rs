@@ -1,9 +1,10 @@
 //! Loading, saving, byte buffers and metadata.
 //!
 //! Supported formats: PNG, JPEG, GIF, BMP, WebP.
-//! AVIF/HEIC decode when the file magic matches and the enabled
-//! `image` decoders support it, otherwise a localized
-//! `Unsupported` error is returned.
+//! PNG uses the pure-Rust codec in `crate::codecs::png` (no
+//! third-party code); JPEG, GIF, BMP and WebP still decode/encode
+//! through the `image` crate until their own codec modules land.
+//! AVIF/HEIC input returns a localized `Unsupported` error.
 
 use std::io::Cursor;
 use std::path::Path;
@@ -114,8 +115,25 @@ pub fn save(buf: &RgbaImage, path: &str, format: ImageFormat, quality: u8) -> Re
     std::fs::write(path, bytes).map_err(|e| ImageError::Io(e.to_string()))
 }
 
+/// Decode PNG bytes with the pure-Rust codec.
+fn decode_png(bytes: &[u8]) -> Result<TiImage, ImageError> {
+    let d = crate::codecs::png::decode(bytes).map_err(|e| match e {
+        crate::codecs::png::PngError::Unsupported(m) => ImageError::Unsupported(m),
+        other => ImageError::Decode(other.to_string()),
+    })?;
+    let buf = crate::RgbaImage::from_raw(d.width, d.height, d.pixels)
+        .ok_or_else(|| ImageError::Decode(tr("invalid_pixel_len")))?;
+    let mut img = TiImage::from_rgba(buf);
+    img.set_format(ImageFormat::Png);
+    Ok(img)
+}
+
 /// 4. Decode from a byte buffer (format auto-detected).
+/// PNG input always uses the pure-Rust codec in `crate::codecs::png`.
 pub fn from_bytes(bytes: &[u8]) -> Result<TiImage, ImageError> {
+    if crate::codecs::png::is_png(bytes) {
+        return decode_png(bytes);
+    }
     let reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| ImageError::Decode(e.to_string()))?;
@@ -142,7 +160,11 @@ pub fn from_bytes(bytes: &[u8]) -> Result<TiImage, ImageError> {
 }
 
 /// 5. Decode from a byte buffer with explicit format.
+/// `ImageFormat::Png` uses the pure-Rust codec in `crate::codecs::png`.
 pub fn from_bytes_with_format(bytes: &[u8], format: ImageFormat) -> Result<TiImage, ImageError> {
+    if format == ImageFormat::Png {
+        return decode_png(bytes);
+    }
     let dynimg = image::load_from_memory_with_format(bytes, format.to_image_format())
         .map_err(|e| ImageError::Decode(e.to_string()))?;
     let mut img = TiImage::from_rgba(dynimg.to_rgba8());
@@ -150,15 +172,19 @@ pub fn from_bytes_with_format(bytes: &[u8], format: ImageFormat) -> Result<TiIma
     Ok(img)
 }
 
-/// 6. Encode a buffer into bytes (quality 1-100, used for JPEG/WebP).
+/// 6. Encode a buffer into bytes (quality 1-100, used for JPEG/WebP;
+/// PNG is lossless so quality is validated but has no effect).
+/// PNG output always uses the pure-Rust codec in `crate::codecs::png`.
 pub fn to_bytes(buf: &RgbaImage, format: ImageFormat, quality: u8) -> Result<Vec<u8>, ImageError> {
     check_quality(quality)?;
+    if format == ImageFormat::Png {
+        return crate::codecs::png::encode(buf.width(), buf.height(), buf.as_raw())
+            .map_err(|e| ImageError::Encode(e.to_string()));
+    }
     let dynimg = DynamicImage::ImageRgba8(buf.clone());
     let mut out = Cursor::new(Vec::new());
     match format {
-        ImageFormat::Png => {
-            dynimg.write_to(&mut out, ImgFmt::Png).map_err(|e| ImageError::Encode(e.to_string()))?;
-        }
+        ImageFormat::Png => unreachable!("handled above"),
         ImageFormat::Gif => {
             dynimg.write_to(&mut out, ImgFmt::Gif).map_err(|e| ImageError::Encode(e.to_string()))?;
         }
@@ -212,7 +238,22 @@ pub fn metadata(path: &str) -> Result<ImageMetadata, ImageError> {
 }
 
 /// 10. Read metadata of a byte buffer.
+/// PNG input uses the pure-Rust IHDR probe (no full decode).
 pub fn metadata_from_bytes(bytes: &[u8]) -> Result<ImageMetadata, ImageError> {
+    if crate::codecs::png::is_png(bytes) {
+        let (w, h) = crate::codecs::png::dimensions(bytes)
+            .map_err(|e| ImageError::Decode(e.to_string()))?;
+        return Ok(ImageMetadata {
+            width: w,
+            height: h,
+            format: Some(ImageFormat::Png),
+            color_type: "RGBA8".to_string(),
+            exif_orientation: None,
+            exif_date_taken: None,
+            exif_camera: None,
+            exif_exposure: None,
+        });
+    }
     let reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| ImageError::Decode(e.to_string()))?;

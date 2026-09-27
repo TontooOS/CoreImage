@@ -14,6 +14,7 @@ SF Symbols resolve through CoreIcon and text watermarks resolve fonts through Co
 | Main index | [MAIN.md](MAIN.md) | This page |
 | Rules | [RULE.md](RULE.md) | Development and usage rules |
 | LoadingSaving | [LoadingSaving.md](LoadingSaving.md) | File load/save, byte buffers, metadata |
+| Codecs | [Codecs.md](Codecs.md) | Pure-Rust codecs, PNG 100 percent without third-party code |
 | Transform | [Transform.md](Transform.md) | Resize, thumbnails, crop, fit, rotation |
 | Filters | [Filters.md](Filters.md) | Adjustments and combinable filter chains |
 | Composite | [Composite.md](Composite.md) | Layering, CoreIcon symbols, CoreText text, masks |
@@ -42,4 +43,5 @@ See [LoadingSaving.md](LoadingSaving.md) for details.
 
 ## Changelog
 
+- 2026-09-27: Pure-Rust PNG codec in `src/codecs/` (100 percent spec decode, own encoder), JPEG/GIF/WebP/BMP still via `image` crate.
 - 2026-09-26: Initial CoreImage wiki and 40+ function API.
