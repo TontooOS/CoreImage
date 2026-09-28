@@ -1,6 +1,6 @@
 /*
  * TontooCoreImage - C Header
- * TontooOS Image Framework (CoreIcon + CoreText integrated)
+ * TontooOS Image Framework (CoreText integrated)
  */
 
 #ifndef TONTOO_COREIMAGE_H

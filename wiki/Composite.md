@@ -1,6 +1,6 @@
 # Composite
 
-Layering, blend modes, CoreText watermarks, CoreIcon SF Symbols, masks and
+Layering, blend modes, CoreText watermarks, tints, masks and
 rounded corners.
 
 ## Functions
@@ -49,23 +49,17 @@ Same as `watermark_text` with an explicit CoreText family. When no font file
 resolves (e.g. CI without system fonts), a bitmap placeholder bar is painted so
 callers still get a visible mark instead of an error.
 
-### `overlay_sf_symbol`
-
-```rust
-pub fn overlay_sf_symbol(&self, symbol_name: &str, x: i64, y: i64, width: u32, height: u32, tint: Option<Rgba8>) -> Result<Self, ImageError>
-```
-
-Resolves the PNG with `coreicon::resolve_icon_path` (for example `"star.fill"`),
-scales it to `width` x `height`, applies the optional RGBA tint multiply and
-overlays it. Returns `Err` when the symbol file does not exist.
-
 ### `tint`
 
 ```rust
 pub fn tint(&self, tint: Rgba8) -> Self
 ```
 
-RGB multiply preserving alpha. Used by `overlay_sf_symbol`.
+RGB multiply preserving alpha. Recolors glyph-style artwork (black
+symbols with alpha become the tint color); transparent pixels stay
+transparent. CoreIcon builds SF Symbol overlays on top of this
+primitive (`load` the symbol asset, `resize`/`fit` it, `tint` it,
+`overlay` it).
 
 ### `alpha_mask`
 
@@ -94,14 +88,20 @@ Center-crops to a square, then applies a full circular alpha mask.
 ## Usage / Example
 
 ```rust
-use coreimage::{Rgba8, TiImage};
+use coreimage::{ImageFormat, Rgba8, TiImage};
 
 let img = TiImage::load("wallpaper.png")?;
-let out = img
-  .overlay_sf_symbol("star.fill", 24, 24, 64, 64, Some(Rgba8::WHITE))?
+let badge = TiImage::solid(64, 64, Rgba8::WHITE)?;
+let out = img.overlay(&badge, 24, 24)
   .watermark_text("TontooOS", 24, 104, 24.0, Rgba8::WHITE)?
   .rounded_corners(48);
 ```
+
+> **Note:** `overlay` takes `&TiImage`; stamping an SF Symbol asset
+> works the same way: `TiImage::load` the symbol file resolved by
+> CoreIcon, then `resize`/`fit`, `tint` and `overlay`. Symbol
+> resolution lives in CoreIcon so CoreIcon can depend on CoreImage
+> without a dependency cycle.
 
 ## Cross References
 

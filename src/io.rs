@@ -1,15 +1,14 @@
 //! Loading, saving, byte buffers and metadata.
 //!
 //! Supported formats: PNG, JPEG, ICO, GIF, BMP, WebP.
-//! PNG, JPEG, ICO, GIF and BMP use the pure-Rust codecs in
-//! `crate::codecs` (no third-party code); WebP still decodes/encodes
-//! through the `image` crate until `codecs::webp` lands.
+//! All six formats use the pure-Rust codecs in `crate::codecs`
+//! (no third-party code).
 //! AVIF/HEIC input returns a localized `Unsupported` error.
 
 use std::io::Cursor;
 use std::path::Path;
 
-use image::{DynamicImage, ImageFormat as ImgFmt};
+use image::ImageFormat as ImgFmt;
 
 use crate::{ImageError, RgbaImage, TiImage, lang::tr};
 
@@ -66,14 +65,16 @@ impl ImageFormat {
         }
     }
 
-    fn to_image_format(self) -> ImgFmt {
+    fn to_image_format(self) -> Option<ImgFmt> {
         match self {
-            Self::Png => ImgFmt::Png,
-            Self::Jpeg => ImgFmt::Jpeg,
-            Self::Gif => ImgFmt::Gif,
-            Self::Bmp => ImgFmt::Bmp,
-            Self::WebP => ImgFmt::WebP,
-            Self::Ico => ImgFmt::Ico,
+            Self::Png => Some(ImgFmt::Png),
+            Self::Jpeg => Some(ImgFmt::Jpeg),
+            Self::Gif => Some(ImgFmt::Gif),
+            Self::Bmp => Some(ImgFmt::Bmp),
+            // WebP uses the native `crate::codecs::webp` codec, never the
+            // `image` crate.
+            Self::WebP => None,
+            Self::Ico => Some(ImgFmt::Ico),
         }
     }
 }
@@ -114,7 +115,7 @@ pub fn load_with_format(path: &str, format: ImageFormat) -> Result<TiImage, Imag
     Ok(img)
 }
 
-/// 3. Save a buffer to file with format + quality (quality 1-100 for JPEG/WebP).
+/// 3. Save a buffer to file with format + quality (quality 1-100 for JPEG).
 pub fn save(buf: &RgbaImage, path: &str, format: ImageFormat, quality: u8) -> Result<(), ImageError> {
     check_quality(quality)?;
     let bytes = to_bytes(buf, format, quality)?;
@@ -187,9 +188,23 @@ fn decode_jpeg(bytes: &[u8]) -> Result<TiImage, ImageError> {
     Ok(img)
 }
 
+/// Decode WebP bytes with the pure-Rust codec (lossy + lossless,
+/// first frame wins for animation).
+fn decode_webp(bytes: &[u8]) -> Result<TiImage, ImageError> {
+    let d = crate::codecs::webp::decode(bytes).map_err(|e| match e {
+        crate::codecs::webp::WebpError::Unsupported(m) => ImageError::Unsupported(m),
+        other => ImageError::Decode(other.to_string()),
+    })?;
+    let buf = crate::RgbaImage::from_raw(d.width, d.height, d.pixels)
+        .ok_or_else(|| ImageError::Decode(tr("invalid_pixel_len")))?;
+    let mut img = TiImage::from_rgba(buf);
+    img.set_format(ImageFormat::WebP);
+    Ok(img)
+}
+
 /// 4. Decode from a byte buffer (format auto-detected).
-/// PNG, JPEG, GIF, BMP and ICO input use the pure-Rust codecs in
-/// `crate::codecs`. Animated GIFs decode to their first frame.
+/// PNG, JPEG, GIF, BMP, ICO and WebP input use the pure-Rust codecs in
+/// `crate::codecs`. Animated GIFs and WebP decode to their first frame.
 pub fn from_bytes(bytes: &[u8]) -> Result<TiImage, ImageError> {
     if crate::codecs::png::is_png(bytes) {
         return decode_png(bytes);
@@ -205,6 +220,9 @@ pub fn from_bytes(bytes: &[u8]) -> Result<TiImage, ImageError> {
     }
     if crate::codecs::ico::is_ico(bytes) {
         return decode_ico(bytes);
+    }
+    if crate::codecs::webp::is_webp(bytes) {
+        return decode_webp(bytes);
     }
     let reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
@@ -224,7 +242,6 @@ pub fn from_bytes(bytes: &[u8]) -> Result<TiImage, ImageError> {
             ImgFmt::Jpeg => ImageFormat::Jpeg,
             ImgFmt::Gif => ImageFormat::Gif,
             ImgFmt::Bmp => ImageFormat::Bmp,
-            ImgFmt::WebP => ImageFormat::WebP,
             ImgFmt::Ico => ImageFormat::Ico,
             _ => ImageFormat::Png,
         });
@@ -234,8 +251,8 @@ pub fn from_bytes(bytes: &[u8]) -> Result<TiImage, ImageError> {
 
 /// 5. Decode from a byte buffer with explicit format.
 /// `ImageFormat::Png`, `ImageFormat::Jpeg`, `ImageFormat::Gif`,
-/// `ImageFormat::Bmp` and `ImageFormat::Ico` use the pure-Rust codecs
-/// in `crate::codecs`.
+/// `ImageFormat::Bmp`, `ImageFormat::Ico` and `ImageFormat::WebP` use
+/// the pure-Rust codecs in `crate::codecs`.
 pub fn from_bytes_with_format(bytes: &[u8], format: ImageFormat) -> Result<TiImage, ImageError> {
     if format == ImageFormat::Png {
         return decode_png(bytes);
@@ -252,17 +269,23 @@ pub fn from_bytes_with_format(bytes: &[u8], format: ImageFormat) -> Result<TiIma
     if format == ImageFormat::Ico {
         return decode_ico(bytes);
     }
-    let dynimg = image::load_from_memory_with_format(bytes, format.to_image_format())
+    if format == ImageFormat::WebP {
+        return decode_webp(bytes);
+    }
+    let fmt = format
+        .to_image_format()
+        .ok_or_else(|| ImageError::Unsupported(tr("unknown_format")))?;
+    let dynimg = image::load_from_memory_with_format(bytes, fmt)
         .map_err(|e| ImageError::Decode(e.to_string()))?;
     let mut img = TiImage::from_rgba(dynimg.to_rgba8());
     img.set_format(format);
     Ok(img)
 }
 
-/// 6. Encode a buffer into bytes (quality 1-100, used for JPEG/WebP;
-/// PNG, GIF, BMP and ICO are lossless so quality is validated but has
-/// no effect). PNG, JPEG, GIF, BMP and ICO output use the pure-Rust
-/// codecs in `crate::codecs`. ICO stores the largest fitting entry
+/// 6. Encode a buffer into bytes (quality 1-100, used for JPEG;
+/// PNG, GIF, BMP, ICO and WebP are lossless so quality is validated
+/// but has no effect). All formats use the pure-Rust codecs in
+/// `crate::codecs`. ICO stores the largest fitting entry
 /// (max 256 px per side).
 pub fn to_bytes(buf: &RgbaImage, format: ImageFormat, quality: u8) -> Result<Vec<u8>, ImageError> {
     check_quality(quality)?;
@@ -289,21 +312,12 @@ pub fn to_bytes(buf: &RgbaImage, format: ImageFormat, quality: u8) -> Result<Vec
         return crate::codecs::bmp::encode(buf.width(), buf.height(), buf.as_raw())
             .map_err(|e| ImageError::Encode(e.to_string()));
     }
-    let dynimg = DynamicImage::ImageRgba8(buf.clone());
-    let mut out = Cursor::new(Vec::new());
-    match format {
-        ImageFormat::Png => unreachable!("handled above"),
-        ImageFormat::Ico => unreachable!("handled above"),
-        ImageFormat::Jpeg => unreachable!("handled above"),
-        ImageFormat::Gif => unreachable!("handled above"),
-        ImageFormat::Bmp => unreachable!("handled above"),
-        ImageFormat::WebP => {
-            // `image` WebP encoder is lossless; quality selects lossless vs lossy path
-            // is not exposed here, so quality is validated but the default encoder is used.
-            dynimg.write_to(&mut out, ImgFmt::WebP).map_err(|e| ImageError::Encode(e.to_string()))?;
-        }
+    if format == ImageFormat::WebP {
+        return crate::codecs::webp::encode(buf.width(), buf.height(), buf.as_raw(), quality)
+            .map_err(|e| ImageError::Encode(e.to_string()));
     }
-    Ok(out.into_inner())
+    // Unreachable: every ImageFormat variant is routed above.
+    Err(ImageError::Unsupported(tr("unknown_format")))
 }
 
 /// 7. Probe the format of a file without full decode (extension + magic).
@@ -375,6 +389,20 @@ pub fn metadata_from_bytes(bytes: &[u8]) -> Result<ImageMetadata, ImageError> {
             width: w,
             height: h,
             format: Some(ImageFormat::Png),
+            color_type: "RGBA8".to_string(),
+            exif_orientation: None,
+            exif_date_taken: None,
+            exif_camera: None,
+            exif_exposure: None,
+        });
+    }
+    if crate::codecs::webp::is_webp(bytes) {
+        let (w, h) = crate::codecs::webp::dimensions(bytes)
+            .map_err(|e| ImageError::Decode(e.to_string()))?;
+        return Ok(ImageMetadata {
+            width: w,
+            height: h,
+            format: Some(ImageFormat::WebP),
             color_type: "RGBA8".to_string(),
             exif_orientation: None,
             exif_date_taken: None,

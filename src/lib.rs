@@ -1,12 +1,18 @@
 //! CoreImage for TontooOS: load, transform, filter, composite and analyze images.
 //!
 //! Backends:
-//! - Raster ops on the `image` crate (PNG, JPEG, GIF, WebP, BMP).
-//! - SF Symbols via `coreicon` (see [`composite::overlay_sf_symbol`]).
+//! - Raster ops on the `image` crate (resize, blur, blend primitives).
+//! - All file codecs (PNG, JPEG, GIF, BMP, ICO, WebP) are pure-Rust
+//!   modules in `crate::codecs` with no third-party dependencies.
 //! - Text rendering via `coretext` font resolution + `ab_glyph`
 //!   rasterization with the SF Pro system font
 //!   (see [`composite::watermark_text`] and [`composite::watermark_text_coretext`]).
 //! - EXIF metadata via `kamadak-exif`.
+//!
+//! Symbol compositing (resolving an SF Symbol asset by name and stamping
+//! it onto an image) lives in CoreIcon, built on top of this library:
+//! load the symbol with `TiImage::load`, scale with `resize` or
+//! `fit`, tint with `tint` and stamp with `overlay`.
 //!
 //! All public strings and error messages resolve through `lang/en_us.json`
 //! and `lang/de_de.json` (see [`lang`]).
@@ -28,10 +34,16 @@ pub use io::{ImageFormat, ImageMetadata};
 pub use lang::{LangCode, tr};
 pub use transform::{FitMode, Rotate90};
 
-use image::{ImageBuffer, Rgba};
+use image::ImageBuffer;
 
 /// RGBA8 pixel buffer used across the whole library.
 pub type RgbaImage = ImageBuffer<Rgba<u8>, Vec<u8>>;
+
+/// Re-exported pixel and filter types so downstream crates (e.g. CoreIcon)
+/// can work with [`RgbaImage`] buffers and [`TiImage::resize`] without
+/// depending on the third-party `image` crate directly.
+pub use image::Rgba;
+pub use image::imageops::FilterType;
 
 /// Solid RGBA color (0-255 per channel).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -152,7 +164,7 @@ impl TiImage {
         io::from_bytes_with_format(bytes, format)
     }
 
-    /// Save to file with format + quality (quality 1-100, used for JPEG/WebP).
+    /// Save to file with format + quality (quality 1-100, used for JPEG).
     pub fn save(&self, path: &str, format: ImageFormat, quality: u8) -> Result<(), ImageError> {
         io::save(&self.buf, path, format, quality)
     }

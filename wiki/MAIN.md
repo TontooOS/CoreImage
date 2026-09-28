@@ -1,7 +1,9 @@
 # CoreImage – Wiki
 
 CoreImage is the image loading, transform, filter, composite and analysis library for TontooOS.
-SF Symbols resolve through CoreIcon and text watermarks resolve fonts through CoreText.
+Text watermarks resolve fonts through CoreText. SF Symbol overlays are composed by CoreIcon
+on top of this library (`load`, `resize`/`fit`, `tint`, `overlay`), so CoreIcon can
+depend on CoreImage without a dependency cycle.
 
 - Repository: https://github.com/TontooOS/CoreImage
 - License: TCL v26.1
@@ -17,7 +19,7 @@ SF Symbols resolve through CoreIcon and text watermarks resolve fonts through Co
 | Codecs | [Codecs.md](Codecs.md) | Pure-Rust codecs, PNG 100 percent without third-party code |
 | Transform | [Transform.md](Transform.md) | Resize, thumbnails, crop, fit, rotation |
 | Filters | [Filters.md](Filters.md) | Adjustments and combinable filter chains |
-| Composite | [Composite.md](Composite.md) | Layering, CoreIcon symbols, CoreText text, masks |
+| Composite | [Composite.md](Composite.md) | Layering, tints, CoreText text, masks |
 | ColorAnalysis | [ColorAnalysis.md](ColorAnalysis.md) | Colorspaces, dominant color, histogram |
 | Ffi | [Ffi.md](Ffi.md) | C ABI in `Headers/coreimage.h` |
 
@@ -43,6 +45,10 @@ See [LoadingSaving.md](LoadingSaving.md) for details.
 
 ## Changelog
 
+- 2026-09-28: Removed the CoreIcon dependency and `TiImage::overlay_sf_symbol`; symbol
+  overlays now compose in CoreIcon from `load` + `resize`/`fit` + `tint` + `overlay`,
+  so CoreIcon can depend on CoreImage without a cycle. Added `Rgba` and `FilterType`
+  re-exports for buffer-level users. See [Composite.md](Composite.md).
 - 2026-09-28: Pure-Rust BMP codec in `src/codecs/` (DIB reuse, RLE4/8, 16-bit); only WebP still via `image` crate.
 - 2026-09-28: Pure-Rust GIF codec in `src/codecs/` (single frame, LZW, median-cut).
 - 2026-09-28: Pure-Rust ICO codec in `src/codecs/` (PNG + BMP entries, AND masks).

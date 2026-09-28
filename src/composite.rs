@@ -1,4 +1,4 @@
-//! Layering, blend modes, text watermarks (CoreText), SF Symbols (CoreIcon),
+//! Layering, blend modes, text watermarks (CoreText),
 //! masks and rounded corners.
 
 use crate::{ImageError, Rgba8, TiImage, lang::tr};
@@ -167,39 +167,10 @@ impl TiImage {
         Ok(Self::from_rgba(out))
     }
 
-    /// 37. Overlay an SF Symbol (CoreIcon) by name, e.g. `"star.fill"`.
+    /// 37. RGB multiply tint preserving per-pixel alpha.
     ///
-    /// The PNG is resolved with `coreicon::resolve_icon_path`,
-    /// scaled to (`width`, `height`) and tinted when `tint` is set.
-    pub fn overlay_sf_symbol(
-        &self,
-        symbol_name: &str,
-        x: i64,
-        y: i64,
-        width: u32,
-        height: u32,
-        tint: Option<Rgba8>,
-    ) -> Result<Self, ImageError> {
-        let path = coreicon::resolve_icon_path(symbol_name);
-        if !path.exists() {
-            return Err(ImageError::Icon(format!(
-                "{}: {}",
-                tr("err_icon"),
-                symbol_name
-            )));
-        }
-        let icon = crate::io::load(&path.to_string_lossy())
-            .map_err(|_| ImageError::Icon(symbol_name.to_string()))?;
-        let icon = icon.resize(width.max(1), height.max(1), image::imageops::FilterType::Lanczos3);
-        let icon = match tint {
-            Some(t) => icon.tint(t),
-            None => icon,
-        };
-        Ok(self.overlay(&icon, x, y))
-    }
-
-    /// Tint helper used by [`TiImage::overlay_sf_symbol`]: multiplies
-    /// RGB channels while preserving per-pixel alpha.
+    /// Recolors glyph-style artwork (black symbols with alpha become the
+    /// tint color); transparent pixels stay transparent.
     pub fn tint(&self, tint: Rgba8) -> Self {
         let mut buf = self.as_rgba().clone();
         for px in buf.pixels_mut() {

@@ -1,7 +1,7 @@
 # Tontoo CoreImage
 
 Image loading, transform, filter, composite and analysis for TontooOS.
-SF Symbols resolve through CoreIcon, text watermarks resolve fonts through CoreText.
+Text watermarks resolve fonts through CoreText.
 
 40+ functions: PNG (100 percent pure Rust), JPEG (baseline sequential,
 pure Rust), GIF (single frame, pure Rust), BMP (incl. RLE, pure Rust)

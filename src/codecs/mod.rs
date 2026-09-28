@@ -1,9 +1,8 @@
 //! Pure-Rust image codecs for CoreImage.
 //!
 //! Each file extension maps to one codec module. `png`, `jpeg`,
-//! `gif`, `bmp` and `ico` are fully implemented in pure Rust with no
-//! third-party dependencies. WebP still decodes/encodes through the
-//! `image` crate until `webp.rs` lands.
+//! `gif`, `bmp`, `ico` and `webp` are fully implemented in pure Rust
+//! with no third-party dependencies.
 //!
 //! To add a codec: create `<format>.rs` with `decode`, `encode`,
 //! `dimensions` and `is_<format>` functions mirroring [`png`],
@@ -14,3 +13,5 @@ pub mod gif;
 pub mod ico;
 pub mod jpeg;
 pub mod png;
+pub mod webp;
+mod webp_vp8_tables;

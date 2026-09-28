@@ -11,6 +11,9 @@ pub fn resize(&self, width: u32, height: u32, filter: FilterType) -> Self
 ```
 
 Exact resize. Pass `FilterType::Lanczos3` for quality or `Triangle` for speed.
+`FilterType` is re-exported as `coreimage::FilterType`, and the `Rgba` pixel
+type of `RgbaImage` buffers as `coreimage::Rgba`, so downstream crates need
+no direct dependency on the third-party `image` crate.
 
 ### `thumbnail`
 
