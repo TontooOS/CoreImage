@@ -11,7 +11,7 @@ AVIF/HEIC input returns an `Unsupported` error when the decoder cannot handle th
 | `ImageFormat::Jpeg` | `jpg`, `jpeg` | Pure Rust (`codecs::jpeg`) | Baseline sequential, `quality` 1-100, no third-party code |
 | `ImageFormat::Ico` | `ico` | Pure Rust (`codecs::ico`) | Largest entry wins, max 256 px per side |
 | `ImageFormat::Gif` | `gif` | Pure Rust (`codecs::gif`) | Single frame (first wins), lossless, no third-party code |
-| `ImageFormat::Bmp` | `bmp` | `image` crate | Uncompressed, own codec planned |
+| `ImageFormat::Bmp` | `bmp` | Pure Rust (`codecs::bmp`) | Uncompressed, RLE, 16-bit, no third-party code |
 | `ImageFormat::WebP` | `webp` | `image` crate | Default encoder path, own codec planned |
 
 See [Codecs.md](Codecs.md) for the pure-Rust PNG codec scope and for adding new codecs.

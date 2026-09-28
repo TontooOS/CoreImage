@@ -197,25 +197,36 @@ fn decode_entry(e: &Entry, blob: &[u8]) -> Result<IcoImage, IcoError> {
     Ok(IcoImage { width: w, height: h, bpp: e.bpp, pixels })
 }
 
-// ── BMP entries ───────────────────────────────────────────────
-// Shared with the future bmp.rs codec.
+// ── Shared DIB parsing (also used by bmp.rs) ────────────────────
 
-/// Decode a BMP-without-file-header ICO entry to `(width, height, RGBA8)`.
-///
-/// Handles BITMAPCOREHEADER (12), BITMAPINFOHEADER (40) and V4/V5
-/// (first 40 fields) with BI_RGB, depths 1/4/8 (palette), 24 (BGR)
-/// and 32 (BGRA), bottom-up or top-down XOR plus the trailing 1-bit
-/// AND mask (1 = transparent).
-pub(crate) fn decode_bmp_entry(blob: &[u8]) -> Result<(u32, u32, Vec<u8>), IcoError> {
+/// Parsed BMP DIB: info header plus palette. Pixel data starts at
+/// `row_data`. Errors are plain strings; callers map them.
+#[derive(Debug, Clone)]
+pub(crate) struct BmpDib<'a> {
+    pub width: u32,
+    /// Stored height, signed as in the file (negative = top-down).
+    /// ICO entries stack XOR + AND rows; standalone BMPs store pixels.
+    pub height: i32,
+    pub planes: u16,
+    pub bpp: u16,
+    pub compression: u32,
+    pub palette: Vec<[u8; 3]>,
+    pub row_data: &'a [u8],
+}
+
+/// Parse any BMP DIB: BITMAPCOREHEADER (12), BITMAPINFOHEADER (40)
+/// and V4/V5 (first 40 fields). No validation of planes, depth or
+/// compression — the caller decides what it supports.
+pub(crate) fn parse_bmp_dib(blob: &[u8]) -> Result<BmpDib<'_>, String> {
     if blob.len() < 4 {
-        return Err(IcoError::Decode("truncated BMP header".into()));
+        return Err("truncated BMP header".into());
     }
     let header_size = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
     let (width, height_signed, planes, bpp, compression, palette_len, row_data_off) =
         match header_size {
             12 => {
                 if blob.len() < 12 {
-                    return Err(IcoError::Decode("truncated BMP core header".into()));
+                    return Err("truncated BMP core header".into());
                 }
                 let w = u16::from_le_bytes([blob[4], blob[5]]) as u32;
                 let h = u16::from_le_bytes([blob[6], blob[7]]) as u32;
@@ -225,7 +236,7 @@ pub(crate) fn decode_bmp_entry(blob: &[u8]) -> Result<(u32, u32, Vec<u8>), IcoEr
             }
             40 | 108 | 124 => {
                 if blob.len() < 40 {
-                    return Err(IcoError::Decode("truncated BMP info header".into()));
+                    return Err("truncated BMP info header".into());
                 }
                 let w = i32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]);
                 let h = i32::from_le_bytes([blob[8], blob[9], blob[10], blob[11]]);
@@ -233,7 +244,7 @@ pub(crate) fn decode_bmp_entry(blob: &[u8]) -> Result<(u32, u32, Vec<u8>), IcoEr
                 let bpp = u16::from_le_bytes([blob[14], blob[15]]);
                 let comp = u32::from_le_bytes([blob[16], blob[17], blob[18], blob[19]]);
                 if w <= 0 {
-                    return Err(IcoError::Decode("invalid BMP width".into()));
+                    return Err("invalid BMP width".into());
                 }
                 let pal = if bpp <= 8 {
                     let n = u32::from_le_bytes([blob[32], blob[33], blob[34], blob[35]]);
@@ -247,37 +258,13 @@ pub(crate) fn decode_bmp_entry(blob: &[u8]) -> Result<(u32, u32, Vec<u8>), IcoEr
                 };
                 (w as u32, h, planes, bpp, comp, pal, header_size as usize)
             }
-            _ => return Err(IcoError::Decode("unknown BMP header size".into())),
+            _ => return Err("unknown BMP header size".into()),
         };
-    if planes != 1 {
-        return Err(IcoError::Decode("invalid BMP planes".into()));
-    }
-    if !matches!(bpp, 1 | 4 | 8 | 24 | 32) {
-        return Err(IcoError::Decode(format!("bpp {bpp} unsupported")));
-    }
-    if compression != 0 {
-        return Err(IcoError::Unsupported(format!("compressed BMP ({compression}) unsupported")));
-    }
-    // Visible height is half the BMP height (XOR + AND); negative XOR
-    // height means top-down storage.
-    let (abs_h, top_down) = if height_signed < 0 {
-        (-height_signed as u32, true)
-    } else {
-        (height_signed as u32, false)
-    };
-    if abs_h == 0 || abs_h % 2 != 0 {
-        return Err(IcoError::Decode("invalid BMP height".into()));
-    }
-    let height = abs_h / 2;
-    if width == 0 || width > 1024 || height == 0 || height > 1024 {
-        return Err(IcoError::Decode("invalid BMP dimensions".into()));
-    }
-
     let entry_bytes = if header_size == 12 { 3 } else { 4 };
     let palette: Vec<[u8; 3]> = if bpp <= 8 {
         let need = row_data_off + palette_len as usize * entry_bytes;
         if blob.len() < need {
-            return Err(IcoError::Decode("truncated BMP palette".into()));
+            return Err("truncated BMP palette".into());
         }
         (0..palette_len)
             .map(|i| {
@@ -289,11 +276,52 @@ pub(crate) fn decode_bmp_entry(blob: &[u8]) -> Result<(u32, u32, Vec<u8>), IcoEr
     } else {
         Vec::new()
     };
+    // Pixel data starts after headers AND palette.
+    let row_data_off = row_data_off + palette.len() * entry_bytes;
+    let row_data = blob.get(row_data_off..).ok_or("truncated BMP pixels")?;
+    Ok(BmpDib { width, height: height_signed, planes, bpp, compression, palette, row_data })
+}
 
-    let xor_off = row_data_off + palette.len() * entry_bytes;
+/// Decode a BMP-without-file-header ICO entry to `(width, height, RGBA8)`.
+///
+/// BI_RGB depths 1/4/8 (palette), 24 (BGR) and 32 (BGRA), bottom-up or
+/// top-down XOR plus the trailing 1-bit AND mask (1 = transparent).
+pub(crate) fn decode_bmp_entry(blob: &[u8]) -> Result<(u32, u32, Vec<u8>), IcoError> {
+    let dib = parse_bmp_dib(blob).map_err(IcoError::Decode)?;
+    let width = dib.width;
+    let bpp = dib.bpp;
+    let palette = dib.palette;
+    if dib.planes != 1 {
+        return Err(IcoError::Decode("invalid BMP planes".into()));
+    }
+    if !matches!(bpp, 1 | 4 | 8 | 24 | 32) {
+        return Err(IcoError::Decode(format!("bpp {bpp} unsupported")));
+    }
+    if dib.compression != 0 {
+        return Err(IcoError::Unsupported(format!(
+            "compressed BMP ({}) unsupported",
+            dib.compression
+        )));
+    }
+    // Visible height is half the BMP height (XOR + AND); negative XOR
+    // height means top-down storage.
+    let (abs_h, top_down) = if dib.height < 0 {
+        (-dib.height as u32, true)
+    } else {
+        (dib.height as u32, false)
+    };
+    if abs_h == 0 || abs_h % 2 != 0 {
+        return Err(IcoError::Decode("invalid BMP height".into()));
+    }
+    let height = abs_h / 2;
+    if width == 0 || width > 1024 || height == 0 || height > 1024 {
+        return Err(IcoError::Decode("invalid BMP dimensions".into()));
+    }
+
+    let data = dib.row_data;
     let xor_stride = xor_stride(width, bpp);
     let xor_len = xor_stride * height as usize;
-    if blob.len() < xor_off + xor_len {
+    if data.len() < xor_len {
         return Err(IcoError::Decode("truncated BMP pixels".into()));
     }
     // AND mask: DWORD-padded rows per spec, but writers in the wild
@@ -301,24 +329,24 @@ pub(crate) fn decode_bmp_entry(blob: &[u8]) -> Result<(u32, u32, Vec<u8>), IcoEr
     // then packed; a missing mask means fully opaque (lenient).
     let and_stride_padded: usize = ((width as usize + 31) / 32) * 4;
     let and_stride_packed: usize = (width as usize + 7) / 8;
-    let and_avail = blob.len() - (xor_off + xor_len);
+    let and_avail = data.len() - xor_len;
     let (and_mask, and_stride): (Option<&[u8]>, usize) =
         if and_avail >= and_stride_padded * height as usize {
             (
-                Some(&blob[xor_off + xor_len..xor_off + xor_len + and_stride_padded * height as usize]),
+                Some(&data[xor_len..xor_len + and_stride_padded * height as usize]),
                 and_stride_padded,
             )
         } else if and_stride_packed != and_stride_padded
             && and_avail >= and_stride_packed * height as usize
         {
             (
-                Some(&blob[xor_off + xor_len..xor_off + xor_len + and_stride_packed * height as usize]),
+                Some(&data[xor_len..xor_len + and_stride_packed * height as usize]),
                 and_stride_packed,
             )
         } else {
             (None, and_stride_padded)
         };
-    let xor = &blob[xor_off..xor_off + xor_len];
+    let xor = &data[..xor_len];
 
     let mut pixels = vec![0u8; width as usize * height as usize * 4];
     for y in 0..height {
@@ -327,7 +355,8 @@ pub(crate) fn decode_bmp_entry(blob: &[u8]) -> Result<(u32, u32, Vec<u8>), IcoEr
         let and_row = (height - 1 - y) as usize;
         let row = &xor[xor_row * xor_stride..(xor_row + 1) * xor_stride];
         for x in 0..width {
-            let (r, g, b, a) = xor_pixel(row, x as usize, bpp, &palette)?;
+            let (r, g, b, a) =
+                xor_pixel(row, x as usize, bpp, &palette).map_err(IcoError::Decode)?;
             let mut alpha = a;
             if let Some(mask) = and_mask {
                 let byte = mask[and_row * and_stride + x as usize / 8];
@@ -342,12 +371,18 @@ pub(crate) fn decode_bmp_entry(blob: &[u8]) -> Result<(u32, u32, Vec<u8>), IcoEr
     Ok((width, height, pixels))
 }
 
-/// XOR row stride (32-bit aligned).
-fn xor_stride(width: u32, bpp: u16) -> usize {
+/// XOR row stride (32-bit aligned). Shared with bmp.rs.
+pub(crate) fn xor_stride(width: u32, bpp: u16) -> usize {
     ((width as usize * bpp as usize + 31) / 32) * 4
 }
 
-fn xor_pixel(row: &[u8], x: usize, bpp: u16, palette: &[[u8; 3]]) -> Result<(u8, u8, u8, u8), IcoError> {
+/// One XOR pixel to RGBA. Shared with bmp.rs; errors are plain strings.
+pub(crate) fn xor_pixel(
+    row: &[u8],
+    x: usize,
+    bpp: u16,
+    palette: &[[u8; 3]],
+) -> Result<(u8, u8, u8, u8), String> {
     match bpp {
         1 | 4 | 8 => {
             let idx = match bpp {
@@ -360,20 +395,20 @@ fn xor_pixel(row: &[u8], x: usize, bpp: u16, palette: &[[u8; 3]]) -> Result<(u8,
             } as usize;
             let entry = *palette
                 .get(idx)
-                .ok_or_else(|| IcoError::Decode("palette index out of range".into()))?;
+                .ok_or_else(|| "palette index out of range".to_string())?;
             Ok((entry[0], entry[1], entry[2], 255))
         }
         24 => {
             let o = x * 3;
             if o + 3 > row.len() {
-                return Err(IcoError::Decode("scanline overrun".into()));
+                return Err("scanline overrun".into());
             }
             Ok((row[o + 2], row[o + 1], row[o], 255))
         }
         _ => {
             let o = x * 4;
             if o + 4 > row.len() {
-                return Err(IcoError::Decode("scanline overrun".into()));
+                return Err("scanline overrun".into());
             }
             Ok((row[o + 2], row[o + 1], row[o], row[o + 3]))
         }

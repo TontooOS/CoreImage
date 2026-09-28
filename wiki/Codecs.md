@@ -1,11 +1,9 @@
 # Codecs
 
 Pure-Rust image codecs in `src/codecs/`. Each file extension maps to
-one codec module. PNG, JPEG, GIF and ICO are fully implemented with no
-third-party dependencies; WebP and BMP still route through the
-`image` crate until their own modules land (`webp.rs`, `bmp.rs`;
-the BMP entry parser in [`ico`](https://github.com/TontooOS/CoreImage)
-is reusable for `bmp.rs`).
+one codec module. PNG, JPEG, GIF, BMP and ICO are fully implemented
+with no third-party dependencies; only WebP still routes through the
+`image` crate until `webp.rs` lands.
 
 ## PNG (`codecs::png`)
 
@@ -157,7 +155,41 @@ pub fn encode_images(images: &[(u32, u32, &[u8])]) -> Result<Vec<u8>, IcoError>
 
 `decode` returns all entries largest-first; `DecodedIco::largest` feeds
 `TiImage` load. The BMP entry parser (`decode_bmp_entry`) is `pub(crate)`
-for reuse by the future `bmp.rs` codec.
+and shared with [`bmp`](https://github.com/TontooOS/CoreImage).
+
+## BMP (`codecs::bmp`)
+
+Standalone `BM` files: 14-byte file header plus a DIB parsed with the
+shared `ico` parser (`parse_bmp_dib`, `xor_pixel`, `xor_stride`).
+
+### Decode scope
+
+| Capability | Status |
+|---|---|
+| COREHEADER (12), INFOHEADER (40), V4/V5, BI_RGB 1/4/8/24/32 | Supported |
+| Bottom-up and top-down storage, palette quirks, header gaps | Supported |
+| RLE4 / RLE8 compression | Supported (encoded, absolute, delta modes) |
+| 16-bit XRGB 555 and BI_BITFIELDS (16/32-bit masks) | Supported |
+| 32-bit BGRA alpha | Preserved (the `image` crate returns opaque) |
+| JPEG/PNG-compressed BMPs, bitmap arrays, OS/2 V2 headers | `Unsupported` with a clear message |
+
+### Encode scope
+
+| Capability | Status |
+|---|---|
+| Output | 32-bit BI_RGB BMP, bottom-up, alpha-preserving |
+
+### Functions
+
+```rust
+pub fn is_bmp(bytes: &[u8]) -> bool
+pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32), BmpError>
+pub fn decode(bytes: &[u8]) -> Result<DecodedBmp, BmpError>
+pub fn encode(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, BmpError>
+```
+
+`decode` always returns RGBA8 pixels. Cross-checked bit-exact against
+the `image` crate and Pillow fixtures in `tests/data/`.
 
 ## GIF (`codecs::gif`)
 
