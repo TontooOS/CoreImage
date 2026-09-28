@@ -1,10 +1,10 @@
 # Codecs
 
 Pure-Rust image codecs in `src/codecs/`. Each file extension maps to
-one codec module. PNG, JPEG and ICO are fully implemented with no
-third-party dependencies; GIF, WebP and BMP still route through the
-`image` crate until their own modules land (`gif.rs`, `webp.rs`,
-`bmp.rs`; the BMP entry parser in [`ico`](https://github.com/TontooOS/CoreImage)
+one codec module. PNG, JPEG, GIF and ICO are fully implemented with no
+third-party dependencies; WebP and BMP still route through the
+`image` crate until their own modules land (`webp.rs`, `bmp.rs`;
+the BMP entry parser in [`ico`](https://github.com/TontooOS/CoreImage)
 is reusable for `bmp.rs`).
 
 ## PNG (`codecs::png`)
@@ -158,6 +158,46 @@ pub fn encode_images(images: &[(u32, u32, &[u8])]) -> Result<Vec<u8>, IcoError>
 `decode` returns all entries largest-first; `DecodedIco::largest` feeds
 `TiImage` load. The BMP entry parser (`decode_bmp_entry`) is `pub(crate)`
 for reuse by the future `bmp.rs` codec.
+
+## GIF (`codecs::gif`)
+
+Single-frame GIF87a/GIF89a, pure Rust. Animated files decode to
+their first frame (thumbnail semantics).
+
+### Decode scope
+
+| Capability | Status |
+|---|---|
+| Global and local color tables | Supported |
+| Graphic Control Extension transparency | Supported, palette RGB kept with alpha 0 |
+| Interlaced images | Supported (4-pass de-interlace) |
+| Positioned sub-images | Supported, composited onto the logical screen |
+| Comment, application (incl. NETSCAPE), plain-text extensions | Skipped |
+| Later animation frames, delays, disposal | Ignored by design, first frame wins |
+
+### Encode scope
+
+| Capability | Status |
+|---|---|
+| Output | Single-frame GIF89a |
+| Palette | Exact up to 256 colors, else median-cut |
+| Transparency | Alpha < 128 shares one trailing index |
+| Compression | Standard LZW with clear codes |
+
+### Functions
+
+```rust
+pub fn is_gif(bytes: &[u8]) -> bool
+pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32), GifError>
+pub fn decode(bytes: &[u8]) -> Result<DecodedGif, GifError>
+pub fn encode(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, GifError>
+```
+
+`decode` always returns RGBA8 pixels. GIF is lossless: cross-checks
+against the `image` crate and Pillow fixtures in `tests/data/` are
+bit-exact. LZW code-size widening follows the asymmetric rule the
+format requires (encoder widens past `2^size`, decoder at `2^size`;
+see `lzw_encode` / `lzw_decode`).
 
 ## Adding a codec
 
