@@ -1,7 +1,7 @@
 //! Loading, saving, byte buffers and metadata.
 //!
-//! Supported formats: PNG, JPEG, GIF, BMP, WebP.
-//! PNG and JPEG use the pure-Rust codecs in `crate::codecs` (no
+//! Supported formats: PNG, JPEG, ICO, GIF, BMP, WebP.
+//! PNG, JPEG and ICO use the pure-Rust codecs in `crate::codecs` (no
 //! third-party code); GIF, BMP and WebP still decode/encode
 //! through the `image` crate until their own codec modules land.
 //! AVIF/HEIC input returns a localized `Unsupported` error.
@@ -21,6 +21,7 @@ pub enum ImageFormat {
     Gif,
     Bmp,
     WebP,
+    Ico,
 }
 
 impl ImageFormat {
@@ -33,12 +34,16 @@ impl ImageFormat {
             "gif" => Some(Self::Gif),
             "bmp" => Some(Self::Bmp),
             "webp" => Some(Self::WebP),
+            "ico" => Some(Self::Ico),
             _ => None,
         }
     }
 
-    /// Detect from magic bytes (PNG/JPEG/GIF/BMP/WebP RIFF).
+    /// Detect from magic bytes (PNG/JPEG/GIF/BMP/WebP RIFF/ICO).
     pub fn from_magic(bytes: &[u8]) -> Option<Self> {
+        if bytes.starts_with(&[0u8, 0, 1, 0]) {
+            return Some(Self::Ico);
+        }
         if bytes.len() < 12 {
             // BMP header is only 2 bytes, still detectable on tiny buffers.
             if bytes.starts_with(b"BM") {
@@ -68,6 +73,7 @@ impl ImageFormat {
             Self::Gif => ImgFmt::Gif,
             Self::Bmp => ImgFmt::Bmp,
             Self::WebP => ImgFmt::WebP,
+            Self::Ico => ImgFmt::Ico,
         }
     }
 }
@@ -128,6 +134,20 @@ fn decode_png(bytes: &[u8]) -> Result<TiImage, ImageError> {
     Ok(img)
 }
 
+/// Decode ICO bytes with the pure-Rust codec (largest entry).
+fn decode_ico(bytes: &[u8]) -> Result<TiImage, ImageError> {
+    let d = crate::codecs::ico::decode(bytes).map_err(|e| match e {
+        crate::codecs::ico::IcoError::Unsupported(m) => ImageError::Unsupported(m),
+        other => ImageError::Decode(other.to_string()),
+    })?;
+    let img = d.largest().ok_or_else(|| ImageError::Decode(tr("empty_image")))?;
+    let buf = crate::RgbaImage::from_raw(img.width, img.height, img.pixels.clone())
+        .ok_or_else(|| ImageError::Decode(tr("invalid_pixel_len")))?;
+    let mut out = TiImage::from_rgba(buf);
+    out.set_format(ImageFormat::Ico);
+    Ok(out)
+}
+
 /// Decode JPEG bytes with the pure-Rust codec.
 fn decode_jpeg(bytes: &[u8]) -> Result<TiImage, ImageError> {
     let d = crate::codecs::jpeg::decode(bytes).map_err(|e| match e {
@@ -142,13 +162,16 @@ fn decode_jpeg(bytes: &[u8]) -> Result<TiImage, ImageError> {
 }
 
 /// 4. Decode from a byte buffer (format auto-detected).
-/// PNG and JPEG input use the pure-Rust codecs in `crate::codecs`.
+/// PNG, JPEG and ICO input use the pure-Rust codecs in `crate::codecs`.
 pub fn from_bytes(bytes: &[u8]) -> Result<TiImage, ImageError> {
     if crate::codecs::png::is_png(bytes) {
         return decode_png(bytes);
     }
     if crate::codecs::jpeg::is_jpeg(bytes) {
         return decode_jpeg(bytes);
+    }
+    if crate::codecs::ico::is_ico(bytes) {
+        return decode_ico(bytes);
     }
     let reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
@@ -169,6 +192,7 @@ pub fn from_bytes(bytes: &[u8]) -> Result<TiImage, ImageError> {
             ImgFmt::Gif => ImageFormat::Gif,
             ImgFmt::Bmp => ImageFormat::Bmp,
             ImgFmt::WebP => ImageFormat::WebP,
+            ImgFmt::Ico => ImageFormat::Ico,
             _ => ImageFormat::Png,
         });
     }
@@ -176,14 +200,17 @@ pub fn from_bytes(bytes: &[u8]) -> Result<TiImage, ImageError> {
 }
 
 /// 5. Decode from a byte buffer with explicit format.
-/// `ImageFormat::Png` and `ImageFormat::Jpeg` use the pure-Rust
-/// codecs in `crate::codecs`.
+/// `ImageFormat::Png`, `ImageFormat::Jpeg` and `ImageFormat::Ico`
+/// use the pure-Rust codecs in `crate::codecs`.
 pub fn from_bytes_with_format(bytes: &[u8], format: ImageFormat) -> Result<TiImage, ImageError> {
     if format == ImageFormat::Png {
         return decode_png(bytes);
     }
     if format == ImageFormat::Jpeg {
         return decode_jpeg(bytes);
+    }
+    if format == ImageFormat::Ico {
+        return decode_ico(bytes);
     }
     let dynimg = image::load_from_memory_with_format(bytes, format.to_image_format())
         .map_err(|e| ImageError::Decode(e.to_string()))?;
@@ -193,8 +220,9 @@ pub fn from_bytes_with_format(bytes: &[u8], format: ImageFormat) -> Result<TiIma
 }
 
 /// 6. Encode a buffer into bytes (quality 1-100, used for JPEG/WebP;
-/// PNG is lossless so quality is validated but has no effect).
-/// PNG and JPEG output use the pure-Rust codecs in `crate::codecs`.
+/// PNG and ICO are lossless so quality is validated but has no effect).
+/// PNG, JPEG and ICO output use the pure-Rust codecs in `crate::codecs`.
+/// ICO stores the largest fitting entry (max 256 px per side).
 pub fn to_bytes(buf: &RgbaImage, format: ImageFormat, quality: u8) -> Result<Vec<u8>, ImageError> {
     check_quality(quality)?;
     if format == ImageFormat::Png {
@@ -205,10 +233,18 @@ pub fn to_bytes(buf: &RgbaImage, format: ImageFormat, quality: u8) -> Result<Vec
         return crate::codecs::jpeg::encode(buf.width(), buf.height(), buf.as_raw(), quality)
             .map_err(|e| ImageError::Encode(e.to_string()));
     }
+    if format == ImageFormat::Ico {
+        if buf.width() > 256 || buf.height() > 256 {
+            return Err(ImageError::InvalidInput(tr("invalid_size")));
+        }
+        return crate::codecs::ico::encode(buf.width(), buf.height(), buf.as_raw())
+            .map_err(|e| ImageError::Encode(e.to_string()));
+    }
     let dynimg = DynamicImage::ImageRgba8(buf.clone());
     let mut out = Cursor::new(Vec::new());
     match format {
         ImageFormat::Png => unreachable!("handled above"),
+        ImageFormat::Ico => unreachable!("handled above"),
         ImageFormat::Gif => {
             dynimg.write_to(&mut out, ImgFmt::Gif).map_err(|e| ImageError::Encode(e.to_string()))?;
         }
@@ -262,9 +298,23 @@ pub fn metadata(path: &str) -> Result<ImageMetadata, ImageError> {
 }
 
 /// 10. Read metadata of a byte buffer.
-/// PNG and JPEG input use the pure-Rust probes (no full decode);
+/// PNG, JPEG and ICO input use the pure-Rust probes (no full decode);
 /// EXIF is read best-effort from the container bytes.
 pub fn metadata_from_bytes(bytes: &[u8]) -> Result<ImageMetadata, ImageError> {
+    if crate::codecs::ico::is_ico(bytes) {
+        let (w, h) = crate::codecs::ico::dimensions(bytes)
+            .map_err(|e| ImageError::Decode(e.to_string()))?;
+        return Ok(ImageMetadata {
+            width: w,
+            height: h,
+            format: Some(ImageFormat::Ico),
+            color_type: "RGBA8".to_string(),
+            exif_orientation: None,
+            exif_date_taken: None,
+            exif_camera: None,
+            exif_exposure: None,
+        });
+    }
     if crate::codecs::png::is_png(bytes) {
         let (w, h) = crate::codecs::png::dimensions(bytes)
             .map_err(|e| ImageError::Decode(e.to_string()))?;

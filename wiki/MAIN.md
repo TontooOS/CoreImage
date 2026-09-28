@@ -43,6 +43,7 @@ See [LoadingSaving.md](LoadingSaving.md) for details.
 
 ## Changelog
 
-- 2026-09-28: Pure-Rust JPEG codec in `src/codecs/` (baseline sequential decode/encode); GIF/WebP/BMP still via `image` crate.
+- 2026-09-28: Pure-Rust ICO codec in `src/codecs/` (PNG + BMP entries, AND masks); GIF/WebP/BMP still via `image` crate.
+- 2026-09-28: Pure-Rust JPEG codec in `src/codecs/` (baseline sequential decode/encode).
 - 2026-09-27: Pure-Rust PNG codec in `src/codecs/` (100 percent spec decode, own encoder).
 - 2026-09-26: Initial CoreImage wiki and 40+ function API.

@@ -1,10 +1,11 @@
 # Codecs
 
 Pure-Rust image codecs in `src/codecs/`. Each file extension maps to
-one codec module. PNG and JPEG are fully implemented with no
+one codec module. PNG, JPEG and ICO are fully implemented with no
 third-party dependencies; GIF, WebP and BMP still route through the
 `image` crate until their own modules land (`gif.rs`, `webp.rs`,
-`bmp.rs`).
+`bmp.rs`; the BMP entry parser in [`ico`](https://github.com/TontooOS/CoreImage)
+is reusable for `bmp.rs`).
 
 ## PNG (`codecs::png`)
 
@@ -121,6 +122,42 @@ let photo = std::fs::read("photo.jpg")?;
 let img = jpeg::decode(&photo)?;
 let small = jpeg::encode(800, 600, &img.pixels, 82)?;
 ```
+
+## ICO (`codecs::ico`)
+
+Icon containers: `ICONDIR` directory plus one entry per image. Pure Rust.
+
+### Decode scope
+
+| Capability | Status |
+|---|---|
+| PNG-compressed entries | Supported, via `codecs::png` |
+| BMP entries 1/4/8-bit paletted, 24-bit BGR, 32-bit BGRA | Supported |
+| 1-bit AND transparency masks | Supported, padded or packed rows |
+| COREHEADER (12), INFOHEADER (40), V4/V5 headers | Supported (BI_RGB) |
+| 256 px entries (zero byte), multi-entry files | Supported, largest first |
+| Cursors (type 2), RLE/BITFIELDS compression | `Unsupported` with a clear message |
+
+### Encode scope
+
+| Capability | Status |
+|---|---|
+| Output | PNG-compressed entries (universally readable) |
+| `encode` / `encode_images` | Single or multi entry, up to 256 px per side |
+
+### Functions
+
+```rust
+pub fn is_ico(bytes: &[u8]) -> bool
+pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32), IcoError>
+pub fn decode(bytes: &[u8]) -> Result<DecodedIco, IcoError>
+pub fn encode(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, IcoError>
+pub fn encode_images(images: &[(u32, u32, &[u8])]) -> Result<Vec<u8>, IcoError>
+```
+
+`decode` returns all entries largest-first; `DecodedIco::largest` feeds
+`TiImage` load. The BMP entry parser (`decode_bmp_entry`) is `pub(crate)`
+for reuse by the future `bmp.rs` codec.
 
 ## Adding a codec
 
