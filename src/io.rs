@@ -307,6 +307,7 @@ pub fn metadata_from_bytes(bytes: &[u8]) -> Result<ImageMetadata, ImageError> {
             .and_then(|f| f.value.get_uint(0));
         meta.exif_date_taken = exif
             .get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY)
+            .or_else(|| exif.get_field(exif::Tag::DateTime, exif::In::PRIMARY))
             .map(|f| f.display_value().to_string());
         let make = exif
             .get_field(exif::Tag::Make, exif::In::PRIMARY)

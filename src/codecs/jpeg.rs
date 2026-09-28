@@ -685,26 +685,27 @@ impl<'a> Decoder<'a> {
                 for sc in &scan_comps {
                     let comp = &frame.comps[sc.idx];
                     let bw = blocks_w(frame.width, frame.h_max, comp.h);
+                    let bh = blocks_h(frame.height, frame.v_max, comp.v);
                     for vy in 0..comp.v {
                         for hx in 0..comp.h {
                             let bx = mx * comp.h + hx;
                             let by = my * comp.v + vy;
-                            if bx >= bw {
-                                continue;
-                            }
-                            let bh = blocks_h(frame.height, frame.v_max, comp.v);
-                            if by >= bh {
-                                continue;
-                            }
-                            let base = (by as usize * bw as usize + bx as usize) * 64;
-                            let block = &mut coeffs[sc.idx][base..base + 64];
+                            // Every MCU block is present in the stream
+                            // (edge blocks are padded by the encoder), so
+                            // always decode and only store in-bounds blocks.
+                            let mut tmp = [0i16; 64];
                             decode_block(
                                 &mut sr,
                                 &self.p.dtables[&(false, sc.td)],
                                 &self.p.dtables[&(true, sc.ta)],
-                                block,
+                                &mut tmp,
                                 &mut dc_pred[sc.idx],
                             )?;
+                            if bx < bw && by < bh {
+                                let base = (by as usize * bw as usize + bx as usize) * 64;
+                                coeffs[sc.idx][base..base + 64].copy_from_slice(&tmp);
+                            }
+
                         }
                     }
                 }
@@ -732,11 +733,17 @@ impl<'a> Decoder<'a> {
 
     fn render(&self, coeffs: &[Vec<i16>]) -> Result<DecodedJpeg, JpegError> {
         let frame = self.p.frame.as_ref().expect("frame");
-        // IDCT each component into its own plane.
-        let mut planes: Vec<(u32, u32, Vec<f32>)> = Vec::new();
+        // IDCT each component into its own plane. Planes are padded
+        // to full blocks; sampling uses the exact component ratio
+        // with ceil clamp bounds (see `bilinear`).
+        let mut planes: Vec<(usize, f32, usize, f32, usize, Vec<f32>)> = Vec::new();
         for (ci, comp) in frame.comps.iter().enumerate() {
             let bw = blocks_w(frame.width, frame.h_max, comp.h);
             let bh = blocks_h(frame.height, frame.v_max, comp.v);
+            let scale_x = comp.h as f32 / frame.h_max as f32;
+            let scale_y = comp.v as f32 / frame.v_max as f32;
+            let max_x = ((frame.width * comp.h + frame.h_max - 1) / frame.h_max) as usize - 1;
+            let max_y = ((frame.height * comp.v + frame.v_max - 1) / frame.v_max) as usize - 1;
             let qt = self.p.qtables[comp.tq]
                 .ok_or_else(|| JpegError::Decode("missing quant table".into()))?;
             let mut plane = vec![0f32; bw as usize * 8 * bh as usize * 8];
@@ -757,31 +764,31 @@ impl<'a> Decoder<'a> {
                     }
                 }
             }
-            planes.push((bw * 8, bh * 8, plane));
+            planes.push((bw as usize * 8, scale_x, max_x, scale_y, max_y, plane));
         }
 
         let w = frame.width as usize;
         let h = frame.height as usize;
         let mut pixels = vec![0u8; w * h * 4];
         if frame.comps.len() == 1 {
-            let (pw, ph, plane) = &planes[0];
+            let (stride, sx, mx, sy, my, plane) = &planes[0];
             for y in 0..h {
                 for x in 0..w {
-                    let g = bilinear(plane, *pw, *ph, w, h, x, y);
+                    let g = bilinear(plane, *stride, *sx, *mx, *sy, *my, w, x, y);
                     let o = (y * w + x) * 4;
                     let v = g.round().clamp(0.0, 255.0) as u8;
                     pixels[o..o + 4].copy_from_slice(&[v, v, v, 255]);
                 }
             }
         } else {
-            let (yw, yh, yp) = &planes[0];
-            let (cbw, cbh, cbp) = &planes[1];
-            let (crw, crh, crp) = &planes[2];
+            let (ys, ysx, ymx, ysy, ymy, yp) = &planes[0];
+            let (cbs, cbsx, cbmx, cbsy, cbmy, cbp) = &planes[1];
+            let (crs, crsx, crmx, crsy, crmy, crp) = &planes[2];
             for y in 0..h {
                 for x in 0..w {
-                    let yy = bilinear(yp, *yw, *yh, w, h, x, y);
-                    let cb = bilinear(cbp, *cbw, *cbh, w, h, x, y) - 128.0;
-                    let cr = bilinear(crp, *crw, *crh, w, h, x, y) - 128.0;
+                    let yy = bilinear(yp, *ys, *ysx, *ymx, *ysy, *ymy, w, x, y);
+                    let cb = bilinear(cbp, *cbs, *cbsx, *cbmx, *cbsy, *cbmy, w, x, y) - 128.0;
+                    let cr = bilinear(crp, *crs, *crsx, *crmx, *crsy, *crmy, w, x, y) - 128.0;
                     let (r, g, b) = ycbcr_to_rgb(yy, cb, cr);
                     let o = (y * w + x) * 4;
                     pixels[o..o + 4].copy_from_slice(&[r, g, b, 255]);
@@ -940,7 +947,8 @@ fn decode_block(
 
 // ── IDCT ──────────────────────────────────────────────────────
 
-/// 8x8 inverse DCT (float, AAN-free direct form). Input dequantized.
+/// 8x8 inverse DCT (float, AAN-free direct form). Input dequantized,
+/// row-major: `coef[v * 8 + u]` is F(u, v).
 fn idct8(coef: &[f32; 64]) -> [f32; 64] {
     // M[u][x] = C(u) * cos((2x+1)*u*pi/16) / 2, folded 0.25 across both passes.
     let mut m = [[0f32; 8]; 8];
@@ -957,7 +965,7 @@ fn idct8(coef: &[f32; 64]) -> [f32; 64] {
         for x in 0..8 {
             let mut s = 0f32;
             for u in 0..8 {
-                s += m[u][x] * coef[u * 8 + y];
+                s += m[u][x] * coef[y * 8 + u];
             }
             tmp[y][x] = s;
         }
@@ -985,24 +993,39 @@ fn ycbcr_to_rgb(y: f32, cb: f32, cr: f32) -> (u8, u8, u8) {
 }
 
 /// Bilinear sample of a component plane mapped onto (w, h) output.
-fn bilinear(plane: &[f32], pw: u32, ph: u32, w: usize, h: usize, x: usize, y: usize) -> f32 {
-    if pw as usize == w && ph as usize == h {
+///
+/// `stride` is the padded plane row length. Sampling uses the exact
+/// component ratio (`hc/hmax`): output x maps to plane (x+0.5)*hc/hmax-0.5,
+/// so chroma stays phase-aligned even for odd sizes (a ceil-based ratio
+/// would stretch, e.g. 19/37 instead of 1/2 for 37 px wide 4:2:0).
+/// Samples clamp to the true (ceil) extents; the padded border replicates
+/// edge pixels.
+fn bilinear(
+    plane: &[f32],
+    stride: usize,
+    scale_x: f32,
+    max_x: usize,
+    scale_y: f32,
+    max_y: usize,
+    w: usize,
+    x: usize,
+    y: usize,
+) -> f32 {
+    if scale_x == 1.0 && scale_y == 1.0 && stride == w {
         return plane[y * w + x];
     }
-    let (pw, ph) = (pw as f32, ph as f32);
-    let sx = (x as f32 + 0.5) * pw / w as f32 - 0.5;
-    let sy = (y as f32 + 0.5) * ph / h as f32 - 0.5;
-    let x0 = sx.floor().clamp(0.0, pw - 1.0) as usize;
-    let y0 = sy.floor().clamp(0.0, ph - 1.0) as usize;
-    let x1 = (x0 + 1).min(pw as usize - 1);
-    let y1 = (y0 + 1).min(ph as usize - 1);
+    let sx = (x as f32 + 0.5) * scale_x - 0.5;
+    let sy = (y as f32 + 0.5) * scale_y - 0.5;
+    let x0 = sx.floor().clamp(0.0, max_x as f32) as usize;
+    let y0 = sy.floor().clamp(0.0, max_y as f32) as usize;
+    let x1 = (x0 + 1).min(max_x);
+    let y1 = (y0 + 1).min(max_y);
     let fx = (sx - x0 as f32).clamp(0.0, 1.0);
     let fy = (sy - y0 as f32).clamp(0.0, 1.0);
-    let pwu = pw as usize;
-    let a = plane[y0 * pwu + x0];
-    let b = plane[y0 * pwu + x1];
-    let c = plane[y1 * pwu + x0];
-    let d = plane[y1 * pwu + x1];
+    let a = plane[y0 * stride + x0];
+    let b = plane[y0 * stride + x1];
+    let c = plane[y1 * stride + x0];
+    let d = plane[y1 * stride + x1];
     a * (1.0 - fx) * (1.0 - fy) + b * fx * (1.0 - fy) + c * (1.0 - fx) * fy + d * fx * fy
 }
 
@@ -1109,15 +1132,12 @@ impl Encoder {
         for my in 0..mcus_y {
             for mx in 0..mcus_x {
                 for (pi, (plane, pw, ph, qt, dc_t, ac_t, hh, vv)) in planes.iter().enumerate() {
-                    let bw = (*pw + 7) / 8;
-                    let bh = (*ph + 7) / 8;
                     for vy in 0..*vv {
                         for hx in 0..*hh {
                             let bx = mx * hh + hx;
                             let by = my * vv + vy;
-                            if bx >= bw || by >= bh {
-                                continue;
-                            }
+                            // Emit padded edge blocks: indices clamp to the
+                            // last row/column below.
                             let mut block = [0f32; 64];
                             for yy in 0..8 {
                                 for xx in 0..8 {
@@ -1248,7 +1268,7 @@ fn write_block(
     }
 }
 
-/// 8x8 forward DCT.
+/// 8x8 forward DCT. Input row-major, output row-major (`out[v * 8 + u]`).
 fn fdct8(block: &[f32; 64]) -> [f32; 64] {
     let mut m = [[0f32; 8]; 8];
     for u in 0..8 {
@@ -1276,7 +1296,7 @@ fn fdct8(block: &[f32; 64]) -> [f32; 64] {
             for y in 0..8 {
                 s += m[v][y] * tmp[u][y];
             }
-            out[u * 8 + v] = s;
+            out[v * 8 + u] = s;
         }
     }
     out

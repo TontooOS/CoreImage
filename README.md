@@ -3,8 +3,8 @@
 Image loading, transform, filter, composite and analysis for TontooOS.
 SF Symbols resolve through CoreIcon, text watermarks resolve fonts through CoreText.
 
-40+ functions: PNG (100 percent pure Rust, no third-party code) plus
-JPEG/GIF/BMP/WebP load and save with quality, byte buffers,
+40+ functions: PNG (100 percent pure Rust) and JPEG (baseline sequential,
+pure Rust) plus GIF/BMP/WebP load and save with quality, byte buffers,
 EXIF metadata, thumbnails, crop, fit modes, rotation, mirroring, brightness,
 contrast, saturation, sharpen, white balance, grayscale, sepia, invert, blur,
 filter chains, blend modes, watermarks, masks, rounded corners, colorspaces,
