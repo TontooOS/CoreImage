@@ -3,7 +3,7 @@ crate-type = ["cdylib", "rlib"]
 
 [package]
 name = "coreimage"
-version = "26.1.0"
+version = "27.0.0"
 edition = "2021"
 authors = ["arlomu"]
 description = "Image loading, transform, filter, composite and analysis library for TontooOS (CoreText integrated)"

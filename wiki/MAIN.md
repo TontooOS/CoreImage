@@ -7,7 +7,7 @@ depend on CoreImage without a dependency cycle.
 
 - Repository: https://github.com/TontooOS/CoreImage
 - License: TCL v26.1
-- Version: 26.1.0
+- Version: 27.0.0
 
 ## Feature Index
 
