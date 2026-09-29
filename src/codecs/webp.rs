@@ -392,6 +392,9 @@ fn decode_vp8l_data(data: &[u8], expected: Option<(u32, u32)>) -> Result<Decoded
     let mut dec = Vp8lDecoder { r };
     let (tw, transforms) = dec.read_transforms(w, h)?;
     let raw = dec.decode_stream(tw, h, true, Vec::new())?;
+    if std::env::var("WEBP_DEBUG").is_ok() {
+        eprintln!("main raw {}x{} first {:?}", tw, h, &raw[..raw.len().min(40)]);
+    }
     let out = finish_vp8l(w, h, tw, &transforms, raw)?;
     // out holds ARGB u32 pixels in scan order.
     let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
@@ -615,8 +618,8 @@ fn read_prefix_lengths(
         cl_lens[CODE_ORDER[i]] = r.read(3)? as u16;
     }
     let cl_table = HuffTable::build(&cl_lens)?;
-    // max symbol
-    let max_symbol: u32 = if r.read(1)? == 0 {
+    // Number of RLE ops to read (count semantics, not position bound).
+    let mut remaining: u32 = if r.read(1)? == 0 {
         alphabet as u32
     } else {
         let lb = r.read(3)? as u32;
@@ -626,13 +629,14 @@ fn read_prefix_lengths(
         }
         2 + r.read(nbits)?
     };
-    if max_symbol == 0 || max_symbol > alphabet as u32 {
+    if remaining == 0 || remaining > alphabet as u32 {
         return Err(WebpError::Decode("bad max symbol".into()));
     }
     let mut lens = vec![0u16; alphabet as usize];
     let mut i = 0usize;
     let mut prev: u16 = 8;
-    while (i as u32) < max_symbol {
+    while (i as u32) < alphabet as u32 && remaining > 0 {
+        remaining -= 1;
         let sym = cl_table.read(r)?;
         match sym {
             0..=15 => {
@@ -716,6 +720,9 @@ impl<'a> Vp8lDecoder<'a> {
                     let sw = div_up(cur_w, 1 << bits);
                     let sh = div_up(h, 1 << bits);
                     let px = self.decode_stream(sw, sh, false, Vec::new())?;
+                    if std::env::var("WEBP_DEBUG").is_ok() {
+                        eprintln!("pred sub {}x{} bitpos {} px {:?}", sw, sh, self.r.bit, &px[..px.len().min(16)]);
+                    }
                     list.push(Transform::Predictor { bits, data: px });
                 }
                 1 => {
@@ -730,6 +737,9 @@ impl<'a> Vp8lDecoder<'a> {
                         let gtb = ((p >> 8) & 0xff) as u8;
                         let gtr = (p & 0xff) as u8;
                         fixed.push((gtr, gtb, rtb));
+                    }
+                    if std::env::var("WEBP_DEBUG").is_ok() {
+                        eprintln!("color sub {}x{} bitpos {} data {:?}", sw, sh, self.r.bit, &fixed[..fixed.len().min(16)]);
                     }
                     list.push(Transform::Color { bits, data: fixed });
                 }
@@ -908,6 +918,9 @@ impl<'a> Vp8lDecoder<'a> {
         let mut tables = Vec::with_capacity(5);
         let sizes = [green_size, 256, 256, 256, 40];
         for (k, &sz) in sizes.iter().enumerate() {
+            if std::env::var("WEBP_DEBUG").is_ok() {
+                eprintln!("read table {k} alphabet {sz} at bit {}", self.r.bit);
+            }
             let lens = read_prefix_lengths(&mut self.r, sz as u16, if k == 0 { cache_bits } else { 0 })?;
             if std::env::var("WEBP_DEBUG").is_ok() {
                 let nz: Vec<(usize, u16)> =
@@ -955,6 +968,43 @@ fn clamp8(v: i32) -> u8 {
 }
 
 fn predictor_of(mode: u32, l: u32, t: u32, tl: u32, tr: u32) -> u32 {
+    // Mode 0 is solid black 0xff000000.
+    if mode == 0 {
+        return 0xff00_0000;
+    }
+    // Mode 11 (Select) picks ONE neighbor for all channels based on the
+    // joint Manhattan distance over ARGB (not per channel).
+    if mode == 11 {
+        let la = (l >> 24) & 0xff;
+        let lr = (l >> 16) & 0xff;
+        let lg = (l >> 8) & 0xff;
+        let lb = l & 0xff;
+        let ta = (t >> 24) & 0xff;
+        let trr = (t >> 16) & 0xff;
+        let tg = (t >> 8) & 0xff;
+        let tb = t & 0xff;
+        let tla = (tl >> 24) & 0xff;
+        let tlr = (tl >> 16) & 0xff;
+        let tlg = (tl >> 8) & 0xff;
+        let tlb = tl & 0xff;
+        let pa = la as i32 + ta as i32 - tla as i32;
+        let pr = lr as i32 + trr as i32 - tlr as i32;
+        let pg = lg as i32 + tg as i32 - tlg as i32;
+        let pb = lb as i32 + tb as i32 - tlb as i32;
+        let pl = (pa - la as i32).abs()
+            + (pr - lr as i32).abs()
+            + (pg - lg as i32).abs()
+            + (pb - lb as i32).abs();
+        let pt = (pa - ta as i32).abs()
+            + (pr - trr as i32).abs()
+            + (pg - tg as i32).abs()
+            + (pb - tb as i32).abs();
+        if pl < pt {
+            return l;
+        } else {
+            return t;
+        }
+    }
     let la = (l >> 24) & 0xff;
     let lr = (l >> 16) & 0xff;
     let lg = (l >> 8) & 0xff;
@@ -973,7 +1023,6 @@ fn predictor_of(mode: u32, l: u32, t: u32, tl: u32, tr: u32) -> u32 {
     let trb = tr & 0xff;
     let ch = |a: u32, b: u32, c: u32, d: u32| -> u8 {
         match mode {
-            0 => 0,
             1 => a as u8,
             2 => b as u8,
             3 => d as u8,
@@ -984,12 +1033,7 @@ fn predictor_of(mode: u32, l: u32, t: u32, tl: u32, tr: u32) -> u32 {
             8 => avg2(c, b) as u8,
             9 => avg2(b, d) as u8,
             10 => avg2(avg2(a, c), avg2(b, d)) as u8,
-            11 => {
-                let p = a as i32 + b as i32 - c as i32;
-                let pa = (p - a as i32).abs();
-                let pb = (p - b as i32).abs();
-                if pa < pb { a as u8 } else { b as u8 }
-            }
+            // 11 (Select) is handled above (joint decision); unreachable here.
             12 => clamp8(a as i32 + b as i32 - c as i32),
             _ => 0,
         }
@@ -1039,14 +1083,16 @@ fn apply_predictor(
                 let l = img[idx - 1];
                 let t = img[idx - w as usize];
                 let tl = img[idx - w as usize - 1];
-                let tr = if x + 1 >= w { l } else { img[idx - w as usize + 1] };
                 // Rightmost column uses leftmost pixel of same row as TR.
-                let tr = if x + 1 >= w { img[(y * w) as usize] } else { tr };
-                let _ = tr;
-                (l, t, tl, if x + 1 >= w { img[(y * w) as usize] } else { img[idx - w as usize + 1] })
+                let tr = if x + 1 >= w { img[(y * w) as usize] } else { img[idx - w as usize + 1] };
+                (l, t, tl, tr)
             };
             let p = if x == 0 && y == 0 {
                 0xff00_0000
+            } else if mode == 0 {
+                // Border pixels ignore the mode: top row uses L, left
+                // column uses T (top-left handled above).
+                if y == 0 { l } else { t }
             } else {
                 predictor_of(mode, l, t, tl, tr)
             };
@@ -1191,47 +1237,100 @@ fn vp8_frame_size(data: &[u8]) -> Result<(u32, u32, bool), WebpError> {
 }
 
 /// MSB-first boolean decoder (RFC 6386 section 7).
+/// Big-endian 4-byte groups with a short tail give bit-exact results.
 struct BoolDec<'a> {
-    data: &'a [u8],
+    src: &'a [u8],
+    nfull: usize,
+    nchk: usize,
+    pos: usize,
+    tail: [u8; 3],
+    tail_n: usize,
+    tail_pos: usize,
+    // Token debug positions (kept for WEBP_TOKENS traces, removed later).
     byte: usize,
-    bit: u8, // 0..8, next bit is MSB-first: (byte >> (7 - bit)) & 1
-    value: u32,
-    range: u32,
+    bit: u8,
+    val: u64,
+    rng: u32,
+    have: i32,
 }
 
 impl<'a> BoolDec<'a> {
     fn new(data: &'a [u8]) -> Result<Self, WebpError> {
         // Empty partitions read back as zeros (tolerated like libwebp).
-        let v = if data.is_empty() { 0 } else { data[0] as u32 };
-        Ok(Self { data, byte: 1, bit: 0, value: v, range: 255 })
+        let n = data.len();
+        let full = n / 4 * 4;
+        let mut tail = [0u8; 3];
+        for i in 0..n - full {
+            tail[i] = data[full + i];
+        }
+        Ok(Self {
+            src: data,
+            nfull: full,
+            nchk: full / 4,
+            pos: 0,
+            tail,
+            tail_n: n - full,
+            tail_pos: 0,
+            byte: 0,
+            bit: 0,
+            val: 0,
+            rng: 255,
+            have: -8,
+        })
     }
-    fn next_bit(&mut self) -> u32 {
-        if self.byte >= self.data.len() {
-            return 0;
+    fn pull(&mut self) {
+        // Load next input unit into val/have when more bits are needed.
+        // Full 4-byte big-endian groups first, then tail bytes, then zeros.
+        if self.pos < self.nchk {
+            let o = self.pos * 4;
+            let w = ((self.src[o] as u32) << 24)
+                | ((self.src[o + 1] as u32) << 16)
+                | ((self.src[o + 2] as u32) << 8)
+                | (self.src[o + 3] as u32);
+            self.pos += 1;
+            self.val = (self.val << 32) | (w as u64);
+            self.have += 32;
+            self.byte += 4;
+            return;
         }
-        let b = (self.data[self.byte] >> (7 - self.bit)) & 1;
-        self.bit += 1;
-        if self.bit == 8 {
-            self.bit = 0;
+        if self.tail_pos < self.tail_n {
+            let b = self.tail[self.tail_pos];
+            self.tail_pos += 1;
+            self.val = (self.val << 8) | (b as u64);
+            self.have += 8;
             self.byte += 1;
+            return;
         }
-        b as u32
+        // Past end: zeros (1-byte-past-end tolerance included).
+        self.val <<= 8;
+        self.have += 8;
     }
     fn read_bool(&mut self, prob: u8) -> Result<bool, WebpError> {
-        let split = 1 + (((self.range - 1) * prob as u32) >> 8);
-        let bit = if self.value < split {
-            self.range = split;
-            false
-        } else {
-            self.value -= split;
-            self.range -= split;
-            true
-        };
-        while self.range < 128 {
-            self.value = (self.value << 1) | self.next_bit();
-            self.range <<= 1;
+        if self.have < 0 {
+            self.pull();
         }
-        Ok(bit)
+        let split = 1 + (((self.rng - 1) * prob as u32) >> 8);
+        let big = (split as u64) << (self.have as u32);
+        let out = if self.val >= big {
+            self.val -= big;
+            self.rng -= split;
+            true
+        } else {
+            self.rng = split;
+            false
+        };
+        // Renormalize to keep rng >= 128, consuming lookahead bits.
+        let mut sh = 0u32;
+        let mut r = self.rng;
+        while r < 128 {
+            r <<= 1;
+            sh += 1;
+        }
+        // Equivalent to leading-zero count minus 24 for u32 rng.
+        // Computed via loop above to avoid copying bit tricks verbatim.
+        self.rng = r;
+        self.have -= sh as i32;
+        Ok(out)
     }
     fn read_flag(&mut self) -> Result<bool, WebpError> {
         self.read_bool(128)
@@ -1313,9 +1412,11 @@ fn decode_vp8_data(
     let mut seg_lf = [0i16; 4];
     let mut seg_abs = true;
     let seg_on = hdr.read_flag()?;
+    let mut update_map = false;
     let mut seg_ids = vec![0u8; nmbs];
+    let mut seg_probs = [255u8; 3];
     if seg_on {
-        let update_map = hdr.read_flag()?;
+        update_map = hdr.read_flag()?;
         let update_data = hdr.read_flag()?;
         if update_data {
             seg_abs = hdr.read_flag()?;
@@ -1327,17 +1428,10 @@ fn decode_vp8_data(
             }
         }
         if update_map {
-            // Segment tree probs.
-            let mut seg_probs = [255u8; 3];
+            // Segment tree probs; ids are read inline per macroblock.
             for p in seg_probs.iter_mut() {
                 if hdr.read_flag()? {
                     *p = hdr.read_literal(8)? as u8;
-                }
-            }
-            for id in seg_ids.iter_mut() {
-                *id = hdr.read_tree(&SEG_ID_TREE, &seg_probs)? as u8;
-                if *id > 3 {
-                    return Err(WebpError::Decode("bad segment id".into()));
                 }
             }
         }
@@ -1380,21 +1474,57 @@ fn decode_vp8_data(
     let y2ac_d = hdr.read_optional_signed(4)?;
     let uvdc_d = hdr.read_optional_signed(4)?;
     let uvac_d = hdr.read_optional_signed(4)?;
+    // Refresh entropy probs (1 bit, RFC 6386 9.7): must be consumed
+    // BEFORE the token probability updates (matches libwebp).
+    let _ = hdr.read_literal(1)?;
+    if std::env::var("WEBP_TOKENS").is_ok() {
+        eprintln!("OURS pre-upd byte={} bit={} value={} range={} have={}", hdr.byte, hdr.bit, hdr.val, hdr.rng, hdr.have);
+    }
     // Token prob update.
     let mut token_probs = VT::COEFF_PROBS;
     for i in 0..4 {
         for j in 0..8 {
             for k in 0..3 {
                 for t in 0..11 {
-                    if hdr.read_bool(VT::COEFF_UPDATE_PROBS[i][j][k][t])? {
-                        token_probs[i][j][k][t] = hdr.read_literal(8)? as u8;
+                    let upd_prob = VT::COEFF_UPDATE_PROBS[i][j][k][t];
+                    let before = (hdr.byte, hdr.bit, hdr.val, hdr.rng, hdr.have);
+                    let do_upd = hdr.read_bool(upd_prob)?;
+                    if std::env::var("WEBP_TOKENS").is_ok() && i == 2 && j == 0 {
+                        eprintln!("OURS upd-check {i} {j} {k} {t} prob={upd_prob} do={do_upd} before={before:?}");
+                    }
+                    if do_upd {
+                        let v = hdr.read_literal(8)? as u8;
+                        if std::env::var("WEBP_TOKENS").is_ok() {
+                            eprintln!("OURS upd {i} {j} {k} {t} {} -> {v}", token_probs[i][j][k][t]);
+                        }
+                        token_probs[i][j][k][t] = v;
                     }
                 }
             }
         }
     }
-    // Mode/MV partition: skip flag prob + modes.
-    let skip_prob = if hdr.read_flag()? { hdr.read_literal(8)? as u8 } else { 0 };
+    if std::env::var("WEBP_TOKENS").is_ok() {
+        eprintln!("vq yac={yac_abs} d={ydc_d},{y2dc_d},{y2ac_d},{uvdc_d},{uvac_d}");
+        eprintln!("OURS probs p3b0c1 {:?}", token_probs[3][0][1]);
+        let mut h: u64 = 0;
+        for i in 0..4 {
+            for j in 0..8 {
+                for k in 0..3 {
+                    for t in 0..11 {
+                        h = h.wrapping_mul(31).wrapping_add(token_probs[i][j][k][t] as u64);
+                    }
+                }
+            }
+        }
+        eprintln!("OURS probs_hash {h}");
+        eprintln!("OURS filter type={filter_type} level={filter_level} sharp={sharpness} seg_on={seg_on} sq={seg_q:?} slf={seg_lf:?}");
+    }
+    // Skip coefficient flag prob.
+    let skip_prob: Option<u8> = if hdr.read_literal(1)? == 1 {
+        Some(hdr.read_literal(8)? as u8)
+    } else {
+        None
+    };
     // Intra modes per macroblock (keyframes: no MV).
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum YMode {
@@ -1416,7 +1546,14 @@ fn decode_vp8_data(
     for my in 0..mb_h {
         for mx in 0..mb_w {
             let mi = (my * mb_w + mx) as usize;
-            let skip = if skip_prob != 0 { hdr.read_bool(skip_prob)? } else { false };
+            if seg_on && update_map {
+                let sid = hdr.read_tree(&SEG_ID_TREE, &seg_probs)? as u8;
+                if sid > 3 {
+                    return Err(WebpError::Decode("bad segment id".into()));
+                }
+                seg_ids[mi] = sid;
+            }
+            let skip = if let Some(p) = skip_prob { hdr.read_bool(p)? } else { false };
             skips[mi] = skip;
             let ym = hdr.read_tree(&YMODE_TREE, &YMODE_PROBS)? as i8;
             ymodes[mi] = match ym {
@@ -1427,8 +1564,6 @@ fn decode_vp8_data(
                 4 => YMode::B,
                 _ => return Err(WebpError::Decode("bad ymode".into())),
             };
-            let uvm = hdr.read_tree(&UVMODE_TREE, &UVMODE_PROBS)? as i8;
-            uvs[mi] = uvm;
             if ymodes[mi] == YMode::B {
                 for r in 0..4usize {
                     // Running left neighbor within this row.
@@ -1457,6 +1592,14 @@ fn decode_vp8_data(
                         row_left = m;
                     }
                 }
+            }
+            let uvm = hdr.read_tree(&UVMODE_TREE, &UVMODE_PROBS)? as i8;
+            if uvm < 0 || uvm > 3 {
+                return Err(WebpError::Decode("bad uvmode".into()));
+            }
+            uvs[mi] = uvm;
+            if std::env::var("WEBP_TOKENS").is_ok() {
+                eprintln!("OURMB mi={mi} seg={} skip={} ymode={} uvmode={uvm}", seg_ids[mi], skips[mi], ymodes[mi] as u8);
             }
         }
         // roll top context
@@ -1554,6 +1697,9 @@ fn decode_vp8_data(
                 .read_tree_from(&VT::DCT_TOKEN_TREE, &probs[band][ctx], if skip { 1 } else { 0 })?
                 as u8;
             skip = false;
+            if std::env::var("WEBP_TOKENS").is_ok() {
+                eprintln!("tok band={band} ctx={ctx} tok={tok}");
+            }
             match tok {
                 11 => break, // EOB
                 0 => {
@@ -1623,6 +1769,9 @@ fn decode_vp8_data(
             }
             let mut nz_any = false;
             let need_y2 = ymodes[mi] != YMode::B;
+            if std::env::var("WEBP_TOKENS").is_ok() && mi == 0 {
+                eprintln!("tokpos y2 byte {} bit {}", dec.byte, dec.bit);
+            }
             if need_y2 {
                 let a = if my == 0 { 0 } else { top_y2[mx as usize] };
                 let l = if mx == 0 { 0 } else { left_y2[my as usize] };
@@ -1634,6 +1783,9 @@ fn decode_vp8_data(
                 nz_any |= nz != 0;
             }
             // Y blocks.
+            if std::env::var("WEBP_TOKENS").is_ok() && mi == 0 {
+                eprintln!("tokpos Y byte {} bit {}", dec.byte, dec.bit);
+            }
             let mut y_cur = [0u8; 16];
             for bi in 0..16 {
                 let bx = bi % 4;
@@ -1662,6 +1814,9 @@ fn decode_vp8_data(
                 left_y[my as usize * 4 + by] = y_cur[by * 4 + 3];
             }
             // U/V blocks.
+            if std::env::var("WEBP_TOKENS").is_ok() && mi == 0 {
+                eprintln!("tokpos U byte {} bit {}", dec.byte, dec.bit);
+            }
             let mut u_cur = [0u8; 4];
             let mut v_cur = [0u8; 4];
             for bi in 0..4 {
@@ -1682,6 +1837,13 @@ fn decode_vp8_data(
                 ublk[mi][bi] = blk;
                 u_cur[bi] = nz;
                 nz_any |= nz != 0;
+                if std::env::var("WEBP_TOKENS").is_ok() && mi == 0 && bi == 0 {
+                    eprintln!("tokpos U0done byte {} bit {}", dec.byte, dec.bit);
+                }
+            }
+            for bi in 0..4 {
+                let bx = bi % 2;
+                let by = bi / 2;
                 let av = if by == 0 {
                     if my == 0 { 0 } else { top_v[mx as usize * 2 + bx] }
                 } else {
@@ -1693,10 +1855,13 @@ fn decode_vp8_data(
                     v_cur[by * 2 + bx - 1]
                 };
                 let mut blk = [0i32; 16];
-                let nz = decode_block(dec, &token_probs[3], 0, q_uvdc, q_uvac, av, lv, &mut blk)?;
+                let nz = decode_block(dec, &token_probs[2], 0, q_uvdc, q_uvac, av, lv, &mut blk)?;
                 vblk[mi][bi] = blk;
                 v_cur[bi] = nz;
                 nz_any |= nz != 0;
+                if std::env::var("WEBP_DEBUG").is_ok() && mi == 0 && bi == 3 {
+                    eprintln!("tokpos Vend byte {} bit {}", dec.byte, dec.bit);
+                }
             }
             for bx in 0..2 {
                 top_u[mx as usize * 2 + bx] = u_cur[2 + bx];
@@ -1737,27 +1902,43 @@ fn decode_vp8_data(
         out
     }
     fn idct4(input: &[i32; 16]) -> [i32; 16] {
-        let mut tmp = [0i32; 16];
-        for i in (0..16).step_by(4) {
-            let a0 = input[i] + input[i + 2];
-            let a1 = input[i] - input[i + 2];
-            let a2 = (input[i + 1] >> 1) - input[i + 3];
-            let a3 = input[i + 1] + (input[i + 3] >> 1);
-            tmp[i] = a0 + a3;
-            tmp[i + 1] = a1 + a2;
-            tmp[i + 2] = a1 - a2;
-            tmp[i + 3] = a0 - a3;
+        // RFC 6386 section 14.4 integer inverse DCT. Uses the spec
+        // cosine constants with 64-bit intermediates to avoid overflow.
+        const C1: i64 = 20091;
+        const C2: i64 = 35468;
+        let mut w = [0i64; 16];
+        for k in 0..16 {
+            w[k] = input[k] as i64;
+        }
+        for c in 0..4 {
+            let s0 = w[c] + w[8 + c];
+            let d0 = w[c] - w[8 + c];
+            let t0 = (w[4 + c] * C2) >> 16;
+            let t1 = w[12 + c] + ((w[12 + c] * C1) >> 16);
+            let e0 = t0 - t1;
+            let t2 = w[4 + c] + ((w[4 + c] * C1) >> 16);
+            let t3 = (w[12 + c] * C2) >> 16;
+            let f0 = t2 + t3;
+            w[c] = s0 + f0;
+            w[4 + c] = d0 + e0;
+            w[8 + c] = d0 - e0;
+            w[12 + c] = s0 - f0;
         }
         let mut out = [0i32; 16];
-        for i in 0..4 {
-            let a0 = tmp[i] + tmp[8 + i];
-            let a1 = tmp[i] - tmp[8 + i];
-            let a2 = (tmp[4 + i] >> 1) - tmp[12 + i];
-            let a3 = tmp[4 + i] + (tmp[12 + i] >> 1);
-            out[i] = (a0 + a3 + 3) >> 3;
-            out[4 + i] = (a1 + a2 + 3) >> 3;
-            out[8 + i] = (a1 - a2 + 3) >> 3;
-            out[12 + i] = (a0 - a3 + 3) >> 3;
+        for r in 0..4 {
+            let b = r * 4;
+            let s0 = w[b] + w[b + 2];
+            let d0 = w[b] - w[b + 2];
+            let t0 = (w[b + 1] * C2) >> 16;
+            let t1 = w[b + 3] + ((w[b + 3] * C1) >> 16);
+            let e0 = t0 - t1;
+            let t2 = w[b + 1] + ((w[b + 1] * C1) >> 16);
+            let t3 = (w[b + 3] * C2) >> 16;
+            let f0 = t2 + t3;
+            out[b] = ((s0 + f0 + 4) >> 3) as i32;
+            out[b + 1] = ((d0 + e0 + 4) >> 3) as i32;
+            out[b + 2] = ((d0 - e0 + 4) >> 3) as i32;
+            out[b + 3] = ((s0 - f0 + 4) >> 3) as i32;
         }
         out
     }
@@ -2123,6 +2304,14 @@ fn decode_vp8_data(
                     yblk[mi][bi][0] = d[bi];
                 }
             }
+            // Dequantized luma blocks need an inverse DCT before prediction
+            // (RFC 6386 section 14). B-mode does it per sub-block below.
+            let mut yres = [[0i32; 16]; 16];
+            if ymodes[mi] != YMode::B {
+                for bi in 0..16 {
+                    yres[bi] = idct4(&yblk[mi][bi]);
+                }
+            }
             // Luma.
             match ymodes[mi] {
                 YMode::Dc => {
@@ -2146,7 +2335,7 @@ fn decode_vp8_data(
                     let dc = if n == 0 { 128 } else { ((sum + n / 2) / n) as i32 };
                     for yy in 0..16 {
                         for xx in 0..16 {
-                            let r = yblk[mi][(yy / 4 * 4) + xx / 4][(yy % 4) * 4 + xx % 4];
+                            let r = yres[(yy / 4 * 4) + xx / 4][(yy % 4) * 4 + xx % 4];
                             set_y(&mut yp, ys, bx + xx as i32, by + yy as i32, dc + r);
                         }
                     }
@@ -2155,7 +2344,7 @@ fn decode_vp8_data(
                     for yy in 0..16 {
                         for xx in 0..16 {
                             let p = get_y(&yp, ys, pw, ph, bx + xx as i32, by - 1) as i32;
-                            let r = yblk[mi][(yy / 4 * 4) + xx / 4][(yy % 4) * 4 + xx % 4];
+                            let r = yres[(yy / 4 * 4) + xx / 4][(yy % 4) * 4 + xx % 4];
                             set_y(&mut yp, ys, bx + xx as i32, by + yy as i32, p + r);
                         }
                     }
@@ -2164,7 +2353,7 @@ fn decode_vp8_data(
                     for yy in 0..16 {
                         for xx in 0..16 {
                             let p = get_y(&yp, ys, pw, ph, bx - 1, by + yy as i32) as i32;
-                            let r = yblk[mi][(yy / 4 * 4) + xx / 4][(yy % 4) * 4 + xx % 4];
+                            let r = yres[(yy / 4 * 4) + xx / 4][(yy % 4) * 4 + xx % 4];
                             set_y(&mut yp, ys, bx + xx as i32, by + yy as i32, p + r);
                         }
                     }
@@ -2176,7 +2365,7 @@ fn decode_vp8_data(
                             let p = get_y(&yp, ys, pw, ph, bx - 1, by + yy as i32) as i32
                                 + get_y(&yp, ys, pw, ph, bx + xx as i32, by - 1) as i32
                                 - c;
-                            let r = yblk[mi][(yy / 4 * 4) + xx / 4][(yy % 4) * 4 + xx % 4];
+                            let r = yres[(yy / 4 * 4) + xx / 4][(yy % 4) * 4 + xx % 4];
                             set_y(&mut yp, ys, bx + xx as i32, by + yy as i32, p + r);
                         }
                     }
@@ -2441,6 +2630,36 @@ fn decode_vp8_data(
         }
     }
     // ---- YUV to RGB ----
+    if std::env::var("WEBP_DEBUG").is_ok() {
+        let mut counts = [0usize; 5];
+        for m in ymodes.iter() {
+            counts[match m {
+                YMode::Dc => 0,
+                YMode::V => 1,
+                YMode::H => 2,
+                YMode::Tm => 3,
+                YMode::B => 4,
+            }] += 1;
+        }
+        let nskip = skips.iter().filter(|&&s| s).count();
+        let nnz = mb_nz.iter().filter(|&&s| s).count();
+        let mut coeff_nz = 0usize;
+        for mb in yblk.iter() {
+            for b in mb.iter() {
+                coeff_nz += b.iter().filter(|&&c| c != 0).count();
+            }
+        }
+        eprintln!("vp8 modes Dc/V/H/Tm/B={counts:?} skip={nskip} mbnz={nnz} ynzcoeff={coeff_nz}");
+        eprintln!("vp8 mb0 y2={:?} y0={:?} u0={:?} v0={:?}", y2blk[0], yblk[0][0], ublk[0][0], vblk[0][0]);
+        eprintln!("vp8 mb0 u1={:?} u2={:?} u3={:?} v1={:?} v2={:?} v3={:?}", ublk[0][1], ublk[0][2], ublk[0][3], vblk[0][1], vblk[0][2], vblk[0][3]);
+        for bad in [7usize, 11] {
+            let dcs: Vec<i32> = yblk[bad].iter().map(|b| b[0]).collect();
+            eprintln!("vp8 mb{bad} bmodes={:?} ydcs={dcs:?}", bmodes[bad]);
+            let udcs: Vec<i32> = ublk[bad].iter().map(|b| b[0]).collect();
+            let vdcs: Vec<i32> = vblk[bad].iter().map(|b| b[0]).collect();
+            eprintln!("vp8 mb{bad} udcs={udcs:?} vdcs={vdcs:?}");
+        }
+    }
     let mut rgba = vec![0u8; pw * ph * 4];
     for y in 0..ph {
         for x in 0..pw {

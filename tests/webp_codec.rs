@@ -266,8 +266,7 @@ fn tiimage_webp_roundtrip() {
 }
 
 #[test]
-fn tiimage_webp_file() {
-    use coreimage::{ImageFormat, TiImage};
+fn tiimage_webp_file() {    use coreimage::{ImageFormat, TiImage};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("t.webP");
     let px = gradient_rgba(37, 23);
@@ -279,4 +278,31 @@ fn tiimage_webp_file() {
     assert_eq!(TiImage::probe_format(path.to_str().unwrap()).unwrap(), ImageFormat::WebP);
     let meta = TiImage::probe_metadata(path.to_str().unwrap()).unwrap();
     assert_eq!((meta.width, meta.height), (37, 23));
+}
+
+/// Local differential-debug helper: dumps our decode of Pillow fixtures
+/// to /tmp for comparison against Pillow. Ignored in normal runs.
+#[test]
+#[ignore]
+fn debug_dump_fixtures() {
+    for name in ["webp_animated.webp"] {
+        let bytes = data(name);
+        match webp::decode(&bytes) {
+            Ok(d) => {
+                let out = format!("/tmp/ours_{}.raw", name.replace(".webp", ""));
+                std::fs::write(&out, &d.pixels).unwrap();
+                eprintln!("{name}: {}x{} -> {out}", d.width, d.height);
+                let mut hist = [0u32; 4];
+                for px in d.pixels.chunks_exact(4) {
+                    hist[0] += px[0] as u32;
+                    hist[1] += px[1] as u32;
+                    hist[2] += px[2] as u32;
+                    hist[3] += px[3] as u32;
+                }
+                let n = (d.width * d.height) as u32;
+                eprintln!("means: {:?}", hist.map(|s| s / n));
+            }
+            Err(e) => eprintln!("{name}: ERROR {e}"),
+        }
+    }
 }

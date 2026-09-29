@@ -270,11 +270,55 @@ impl BitWriter {
             }
         }
     }
+    /// Pad with zero bits to the next byte boundary (required before
+    /// stored blocks; must NOT be used between dynamic blocks).
+    fn align_to_byte(&mut self) {
+        if self.filled > 0 {
+            self.out.push(self.current as u8);
+            self.current = 0;
+            self.filled = 0;
+        }
+    }
+    /// Append raw bytes; caller must ensure byte alignment first.
+    fn append_bytes(&mut self, bytes: &[u8]) {
+        debug_assert_eq!(self.filled, 0);
+        self.out.extend_from_slice(bytes);
+    }
     fn into_bytes(mut self) -> Vec<u8> {
         if self.filled > 0 {
             self.out.push(self.current as u8);
         }
         self.out
+    }
+}
+
+/// Emit one stored (uncompressed) block sequence for `raw` into the
+/// bit stream `w`. Handles >64k splits; only the very last sub-block
+/// carries BFINAL when `is_final` is set.
+///
+/// BFINAL/BTYPE are written at the current bit position, then the stream
+/// is padded to the next byte boundary before LEN/NLEN (RFC 1951 §3.2.3).
+/// The old code aligned *before* writing the header, corrupting every
+/// stored block that followed a dynamic block mid-byte.
+fn emit_stored_block(w: &mut BitWriter, raw: &[u8], is_final: bool) {
+    if raw.is_empty() {
+        w.write_bits(is_final as u32, 1);
+        w.write_bits(0, 2); // BTYPE 00 stored
+        w.align_to_byte();
+        w.append_bytes(&[0x00, 0x00, 0xFF, 0xFF]);
+        return;
+    }
+    let mut k = 0usize;
+    while k < raw.len() {
+        let chunk_len = (raw.len() - k).min(65535);
+        let last = is_final && k + chunk_len >= raw.len();
+        w.write_bits(last as u32, 1);
+        w.write_bits(0, 2); // BTYPE 00 stored
+        w.align_to_byte();
+        w.append_bytes(&(chunk_len as u16).to_le_bytes());
+        w.append_bytes(&(!(chunk_len as u16)).to_le_bytes());
+        w.append_bytes(&raw[k..k + chunk_len]);
+        k += chunk_len;
     }
 }
 
@@ -753,7 +797,9 @@ fn length_limited_lengths(freqs: &[u32]) -> Vec<u8> {
         init[s] = bits as u8; // temporary store
     }
     if overflow > 0 {
-        let mut ov = overflow;
+        // zlib gen_bitlen overflow correction: move one leaf down and one
+        // overflow item as its brother, dropping one MAX-length slot.
+        let mut ov = overflow as i32;
         while ov > 0 {
             let mut bits = MAX_BITS - 1;
             while bits > 0 && bl_count[bits] == 0 {
@@ -764,10 +810,8 @@ fn length_limited_lengths(freqs: &[u32]) -> Vec<u8> {
             }
             bl_count[bits] -= 1;
             bl_count[bits + 1] += 2;
-            ov = ov.saturating_sub(2);
-            if ov == 0 {
-                break;
-            }
+            bl_count[MAX_BITS] = bl_count[MAX_BITS].saturating_sub(1);
+            ov -= 2;
         }
     }
     // Reassign shortest codes to most frequent symbols (valid Kraft set
@@ -970,11 +1014,57 @@ fn deflate_zlib(input: &[u8]) -> Vec<u8> {
     let mut tokens: Vec<Token> = Vec::new();
     let mut consumed = 0usize; // bytes covered by `tokens` since seg_start
 
-    enum Pending {
-        Block { bytes: Vec<u8> },
-        Stored { raw: Vec<u8>, is_final: bool },
+    // Single bit stream for all dynamic blocks. Deflate blocks are
+    // bit-packed back-to-back; only stored blocks align to bytes.
+    // (The old code finished each block with into_bytes(), inserting up
+    // to 7 zero padding bits between blocks and corrupting every image
+    // larger than one BLOCK_TOKENS chunk.)
+    let mut w = BitWriter::new();
+    let mut blocks_emitted = 0usize;
+    let mut emitted_final = false;
+
+    // Encode one token chunk into the shared stream.
+    // Validates the dynamic block by round-tripping it through our own
+    // inflate; any block that fails validation falls back to stored
+    // (always valid). This guarantees no corrupt PNG ever leaves the
+    // encoder, even for pathological frequency distributions.
+    fn dynamic_block_roundtrips(tokens: &[Token], raw: &[u8]) -> bool {
+        let mut tmp = BitWriter::new();
+        write_dynamic_block(&mut tmp, tokens, true);
+        let dyn_bytes = tmp.into_bytes();
+        let mut z = Vec::with_capacity(dyn_bytes.len() + 6);
+        z.extend_from_slice(&[0x78, 0x01]);
+        z.extend_from_slice(&dyn_bytes);
+        z.extend_from_slice(&adler32(raw).to_be_bytes());
+        match inflate(&z, raw.len()) {
+            Ok(out) => out == raw,
+            Err(_) => false,
+        }
     }
-    let mut finished: Vec<Pending> = Vec::new();
+    fn flush_chunk(
+        w: &mut BitWriter,
+        input: &[u8],
+        seg_start: usize,
+        consumed: usize,
+        tokens: &[Token],
+        is_final: bool,
+    ) {
+        let raw = &input[seg_start..seg_start + consumed];
+        if !dynamic_block_roundtrips(tokens, raw) {
+            emit_stored_block(w, raw, is_final);
+            return;
+        }
+        // Probe dynamic size with a temp writer (includes its own pad
+        // byte; conservative but still valid when it picks stored).
+        let mut tmp = BitWriter::new();
+        write_dynamic_block(&mut tmp, tokens, is_final);
+        let dyn_len = tmp.into_bytes().len();
+        if dyn_len >= raw.len() + 5 {
+            emit_stored_block(w, raw, is_final);
+        } else {
+            write_dynamic_block(w, tokens, is_final);
+        }
+    }
 
     let mut pend: Option<(u32, u32)> = None;
     while i < n {
@@ -1010,15 +1100,11 @@ fn deflate_zlib(input: &[u8]) -> Vec<u8> {
             }
         }
         if pend.is_none() && (tokens.len() >= BLOCK_TOKENS || i >= n) {
-            let raw = &input[seg_start..seg_start + consumed];
             let is_final = i >= n;
-            let mut tmp = BitWriter::new();
-            write_dynamic_block(&mut tmp, &tokens, is_final);
-            let dyn_bytes = tmp.into_bytes();
-            if dyn_bytes.len() >= raw.len() + 5 {
-                finished.push(Pending::Stored { raw: raw.to_vec(), is_final });
-            } else {
-                finished.push(Pending::Block { bytes: dyn_bytes });
+            flush_chunk(&mut w, input, seg_start, consumed, &tokens, is_final);
+            blocks_emitted += 1;
+            if is_final {
+                emitted_final = true;
             }
             tokens.clear();
             seg_start += consumed;
@@ -1029,60 +1115,11 @@ fn deflate_zlib(input: &[u8]) -> Vec<u8> {
         tokens.push(Token::Match { len: pl, dist: pd });
         consumed += pl as usize;
     }
-    if !tokens.is_empty() || finished.is_empty() {
-        let raw = &input[seg_start..seg_start + consumed];
-        let mut tmp = BitWriter::new();
-        write_dynamic_block(&mut tmp, &tokens, true);
-        let dyn_bytes = tmp.into_bytes();
-        if !raw.is_empty() && dyn_bytes.len() >= raw.len() + 5 {
-            finished.push(Pending::Stored { raw: raw.to_vec(), is_final: true });
-        } else if raw.is_empty() && dyn_bytes.len() > 2 {
-            // Degenerate: still valid (dynamic EOB-only block is fine).
-            finished.push(Pending::Block { bytes: dyn_bytes });
-        } else {
-            finished.push(Pending::Block { bytes: dyn_bytes });
-        }
+    if !emitted_final && (!tokens.is_empty() || blocks_emitted == 0) {
+        flush_chunk(&mut w, input, seg_start, consumed, &tokens, true);
     }
 
-    // Serialize: dynamic blocks append as bit streams; stored blocks need
-    // byte alignment, so replay: concatenate dynamic bytes, then if a stored
-    // block appears the stream must already be byte-aligned (dynamic blocks
-    // always end byte-padded by into_bytes). Track: dynamic into_bytes pads
-    // with zero bits to a full byte, so concatenation stays valid.
-    let mut payload: Vec<u8> = Vec::new();
-    for item in &finished {
-        match item {
-            Pending::Block { bytes } => payload.extend_from_slice(bytes),
-            Pending::Stored { raw, is_final } => {
-                // payload is byte-aligned here (all appends are whole bytes).
-                let mut k = 0usize;
-                while k < raw.len() {
-                    let chunk = &raw[k..(k + 65535).min(raw.len())];
-                    let last = *is_final && k + chunk.len() >= raw.len();
-                    payload.push(if last { 0x01 } else { 0x00 });
-                    payload.extend_from_slice(&(chunk.len() as u16).to_le_bytes());
-                    payload.extend_from_slice(&(!(chunk.len() as u16)).to_le_bytes());
-                    payload.extend_from_slice(chunk);
-                    k += chunk.len();
-                }
-                if raw.is_empty() {
-                    payload.push(if *is_final { 0x01 } else { 0x00 });
-                    payload.extend_from_slice(&[0x00, 0x00, 0xFF, 0xFF]);
-                }
-            }
-        }
-    }
-
-    // Fix BFINAL flags: exactly the last block must be final. Dynamic blocks
-    // were written with is_final only on the true last token block; stored
-    // blocks carry their own flag. Mixed sequences (dynamic non-final
-    // followed by stored final, etc.) are already consistent because each
-    // block got the correct flag at build time — except a dynamic block
-    // built with is_final=false followed by more blocks is fine, and the
-    // final block (any kind) has BFINAL=1. One hole: if the last token block
-    // was marked final but a stored block was appended after? No: stored
-    // blocks replace their own token block in order, flags preserved.
-    out.extend_from_slice(&payload);
+    out.extend_from_slice(&w.into_bytes());
     out.extend_from_slice(&adler32(input).to_be_bytes());
     out
 }
