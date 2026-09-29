@@ -6,7 +6,7 @@ on top of this library (`load`, `resize`/`fit`, `tint`, `overlay`), so CoreIcon 
 depend on CoreImage without a dependency cycle.
 
 - Repository: https://github.com/TontooOS/CoreImage
-- License: TCL v26.1
+- License: TCL v27.0
 - Version: 27.0.0
 
 ## Feature Index
