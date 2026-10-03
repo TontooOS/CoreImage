@@ -10,7 +10,10 @@ lossless, pure Rust) with quality, byte buffers,
 EXIF metadata, thumbnails, crop, fit modes, rotation, mirroring, brightness,
 contrast, saturation, sharpen, white balance, grayscale, sepia, invert, blur,
 filter chains, blend modes, watermarks, masks, rounded corners, colorspaces,
-dominant color and histograms. All file codecs live in `src/codecs/`.
+dominant color and histograms. All file codecs live in `src/codecs/`. AVIF is parsed
+natively as well: ISOBMFF container plus AV1 sequence and frame headers, so probe,
+metadata and dimensions work without the `image` crate; pixel reconstruction of AV1
+tiles is not implemented yet and reports `Unsupported`.
 
 ## Made for TontooOS
 

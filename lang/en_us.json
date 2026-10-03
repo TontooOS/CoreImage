@@ -11,6 +11,7 @@
   "invalid_crop": "crop rectangle is out of bounds",
   "invalid_quality": "quality must be 1..=100",
   "unknown_format": "unknown image format",
+  "avif_encode_unsupported": "AVIF encoding needs an AV1 encoder",
   "empty_image": "image buffer is empty",
   "text_empty": "text must not be empty"
 }

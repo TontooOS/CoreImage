@@ -11,6 +11,7 @@
   "invalid_crop": "Zuschneidebereich ausserhalb des Bildes",
   "invalid_quality": "Qualitaet muss 1..=100 sein",
   "unknown_format": "unbekanntes Bildformat",
+  "avif_encode_unsupported": "AVIF-Kodierung braucht einen AV1-Encoder",
   "empty_image": "Bildpuffer ist leer",
   "text_empty": "Text darf nicht leer sein"
 }

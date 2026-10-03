@@ -1,9 +1,10 @@
 //! Loading, saving, byte buffers and metadata.
 //!
-//! Supported formats: PNG, JPEG, ICO, GIF, BMP, WebP.
-//! All six formats use the pure-Rust codecs in `crate::codecs`
-//! (no third-party code).
-//! AVIF/HEIC input returns a localized `Unsupported` error.
+//! Supported formats: PNG, JPEG, ICO, GIF, BMP, WebP and AVIF. All of them use
+//! the pure-Rust codecs in `crate::codecs` (no third-party code). AVIF
+//! decodes the ISOBMFF container and the AV1 bitstream headers natively; the
+//! AV1 tile level entropy decoder is not part of this crate yet, so AVIF pixel
+//! data currently returns a localized `Unsupported` error.
 
 use std::io::Cursor;
 use std::path::Path;
@@ -21,6 +22,7 @@ pub enum ImageFormat {
     Bmp,
     WebP,
     Ico,
+    Avif,
 }
 
 impl ImageFormat {
@@ -34,11 +36,12 @@ impl ImageFormat {
             "bmp" => Some(Self::Bmp),
             "webp" => Some(Self::WebP),
             "ico" => Some(Self::Ico),
+            "avif" | "avis" => Some(Self::Avif),
             _ => None,
         }
     }
 
-    /// Detect from magic bytes (PNG/JPEG/GIF/BMP/WebP RIFF/ICO).
+    /// Detect from magic bytes (PNG/JPEG/GIF/BMP/WebP RIFF/ICO/AVIF ftyp).
     pub fn from_magic(bytes: &[u8]) -> Option<Self> {
         if bytes.starts_with(&[0u8, 0, 1, 0]) {
             return Some(Self::Ico);
@@ -60,6 +63,8 @@ impl ImageFormat {
             Some(Self::Bmp)
         } else if bytes.starts_with(b"RIFF") && bytes[8..12] == *b"WEBP" {
             Some(Self::WebP)
+        } else if crate::codecs::avif::is_avif(bytes) {
+            Some(Self::Avif)
         } else {
             None
         }
@@ -75,6 +80,8 @@ impl ImageFormat {
             // `image` crate.
             Self::WebP => None,
             Self::Ico => Some(ImgFmt::Ico),
+            // AVIF uses the native `crate::codecs::avif` codec.
+            Self::Avif => None,
         }
     }
 }
@@ -202,8 +209,21 @@ fn decode_webp(bytes: &[u8]) -> Result<TiImage, ImageError> {
     Ok(img)
 }
 
+/// Decode AVIF bytes with the native container and AV1 header parsers.
+fn decode_avif(bytes: &[u8]) -> Result<TiImage, ImageError> {
+    let d = crate::codecs::avif::decode(bytes).map_err(|e| match e {
+        crate::codecs::avif::AvifError::Unsupported(m) => ImageError::Unsupported(m),
+        other => ImageError::Decode(other.to_string()),
+    })?;
+    let buf = crate::RgbaImage::from_raw(d.width, d.height, d.pixels)
+        .ok_or_else(|| ImageError::Decode(tr("invalid_pixel_len")))?;
+    let mut img = TiImage::from_rgba(buf);
+    img.set_format(ImageFormat::Avif);
+    Ok(img)
+}
+
 /// 4. Decode from a byte buffer (format auto-detected).
-/// PNG, JPEG, GIF, BMP, ICO and WebP input use the pure-Rust codecs in
+/// PNG, JPEG, GIF, BMP, ICO, WebP and AVIF input use the pure-Rust codecs in
 /// `crate::codecs`. Animated GIFs and WebP decode to their first frame.
 pub fn from_bytes(bytes: &[u8]) -> Result<TiImage, ImageError> {
     if crate::codecs::png::is_png(bytes) {
@@ -223,6 +243,9 @@ pub fn from_bytes(bytes: &[u8]) -> Result<TiImage, ImageError> {
     }
     if crate::codecs::webp::is_webp(bytes) {
         return decode_webp(bytes);
+    }
+    if crate::codecs::avif::is_avif(bytes) {
+        return decode_avif(bytes);
     }
     let reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
@@ -251,8 +274,8 @@ pub fn from_bytes(bytes: &[u8]) -> Result<TiImage, ImageError> {
 
 /// 5. Decode from a byte buffer with explicit format.
 /// `ImageFormat::Png`, `ImageFormat::Jpeg`, `ImageFormat::Gif`,
-/// `ImageFormat::Bmp`, `ImageFormat::Ico` and `ImageFormat::WebP` use
-/// the pure-Rust codecs in `crate::codecs`.
+/// `ImageFormat::Bmp`, `ImageFormat::Ico`, `ImageFormat::WebP` and
+/// `ImageFormat::Avif` use the pure-Rust codecs in `crate::codecs`.
 pub fn from_bytes_with_format(bytes: &[u8], format: ImageFormat) -> Result<TiImage, ImageError> {
     if format == ImageFormat::Png {
         return decode_png(bytes);
@@ -271,6 +294,9 @@ pub fn from_bytes_with_format(bytes: &[u8], format: ImageFormat) -> Result<TiIma
     }
     if format == ImageFormat::WebP {
         return decode_webp(bytes);
+    }
+    if format == ImageFormat::Avif {
+        return decode_avif(bytes);
     }
     let fmt = format
         .to_image_format()
@@ -316,6 +342,9 @@ pub fn to_bytes(buf: &RgbaImage, format: ImageFormat, quality: u8) -> Result<Vec
         return crate::codecs::webp::encode(buf.width(), buf.height(), buf.as_raw(), quality)
             .map_err(|e| ImageError::Encode(e.to_string()));
     }
+    if format == ImageFormat::Avif {
+        return Err(ImageError::Unsupported(tr("avif_encode_unsupported")));
+    }
     // Unreachable: every ImageFormat variant is routed above.
     Err(ImageError::Unsupported(tr("unknown_format")))
 }
@@ -350,8 +379,19 @@ pub fn metadata(path: &str) -> Result<ImageMetadata, ImageError> {
     Ok(meta)
 }
 
+/// Human readable chroma layout for the metadata `color_type` field.
+fn chroma_label(format: crate::codecs::av1::ChromaFormat) -> &'static str {
+    use crate::codecs::av1::ChromaFormat;
+    match format {
+        ChromaFormat::Cs420 => "420",
+        ChromaFormat::Cs422 => "422",
+        ChromaFormat::Cs444 => "444",
+        ChromaFormat::Monochrome => "400",
+    }
+}
+
 /// 10. Read metadata of a byte buffer.
-/// PNG, JPEG, ICO and BMP input use the pure-Rust probes (no full
+/// PNG, JPEG, ICO, BMP, WebP and AVIF input use the pure-Rust probes (no full
 /// decode); EXIF is read best-effort from the container bytes.
 pub fn metadata_from_bytes(bytes: &[u8]) -> Result<ImageMetadata, ImageError> {
     if crate::codecs::bmp::is_bmp(bytes) {
@@ -404,6 +444,21 @@ pub fn metadata_from_bytes(bytes: &[u8]) -> Result<ImageMetadata, ImageError> {
             height: h,
             format: Some(ImageFormat::WebP),
             color_type: "RGBA8".to_string(),
+            exif_orientation: None,
+            exif_date_taken: None,
+            exif_camera: None,
+            exif_exposure: None,
+        });
+    }
+    if crate::codecs::avif::is_avif(bytes) {
+        let info = crate::codecs::avif::probe(bytes)
+            .map_err(|e| ImageError::Decode(e.to_string()))?;
+        let depth = info.depths.first().copied().unwrap_or(8);
+        return Ok(ImageMetadata {
+            width: info.width,
+            height: info.height,
+            format: Some(ImageFormat::Avif),
+            color_type: format!("AV1-{:02}{}", depth * 4, chroma_label(info.chroma_format)),
             exif_orientation: None,
             exif_date_taken: None,
             exif_camera: None,

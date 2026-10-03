@@ -317,4 +317,5 @@ let out = webp::encode(img.width, img.height, &img.pixels, 100)?;
 ## Cross References
 
 - [LoadingSaving.md](LoadingSaving.md) – routing of formats in `io`
+- [Avif.md](Avif.md) – AVIF container on top of these codecs and the AV1 headers
 - [Composite.md](Composite.md) – CoreIcon PNGs decode through this codec
