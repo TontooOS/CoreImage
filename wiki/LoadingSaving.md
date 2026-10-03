@@ -1,6 +1,7 @@
 # LoadingSaving
 
-File loading/saving, byte buffers and metadata. Formats are PNG, JPEG, GIF, BMP and WebP.
+File loading/saving, byte buffers and metadata. Formats are PNG, JPEG, ICO, GIF, BMP and
+WebP. All six decode and encode through the pure-Rust codecs in `crate::codecs`.
 AVIF/HEIC input returns an `Unsupported` error when the decoder cannot handle the magic.
 
 ## Formats
@@ -12,9 +13,9 @@ AVIF/HEIC input returns an `Unsupported` error when the decoder cannot handle th
 | `ImageFormat::Ico` | `ico` | Pure Rust (`codecs::ico`) | Largest entry wins, max 256 px per side |
 | `ImageFormat::Gif` | `gif` | Pure Rust (`codecs::gif`) | Single frame (first wins), lossless, no third-party code |
 | `ImageFormat::Bmp` | `bmp` | Pure Rust (`codecs::bmp`) | Uncompressed, RLE, 16-bit, no third-party code |
-| `ImageFormat::WebP` | `webp` | `image` crate | Default encoder path, own codec planned |
+| `ImageFormat::WebP` | `webp` | Pure Rust (`codecs::webp`) | VP8 lossy and VP8L lossless decode, lossless encode |
 
-See [Codecs.md](Codecs.md) for the pure-Rust PNG codec scope and for adding new codecs.
+See [Codecs.md](Codecs.md) for the pure-Rust codec scopes and for adding new codecs.
 
 ## Functions
 

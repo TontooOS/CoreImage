@@ -3,7 +3,9 @@
 CoreImage is the image loading, transform, filter, composite and analysis library for TontooOS.
 Text watermarks resolve fonts through CoreText. SF Symbol overlays are composed by CoreIcon
 on top of this library (`load`, `resize`/`fit`, `tint`, `overlay`), so CoreIcon can
-depend on CoreImage without a dependency cycle.
+depend on CoreImage without a dependency cycle. Every file format (PNG, JPEG, GIF, BMP,
+ICO, WebP) is decoded and encoded by pure-Rust codecs in `crate::codecs`; the third-party
+`image` crate is only used for raster operations and pixel buffer types.
 
 - Repository: https://github.com/TontooOS/CoreImage
 - License: TCL v27.0
@@ -16,7 +18,7 @@ depend on CoreImage without a dependency cycle.
 | Main index | [MAIN.md](MAIN.md) | This page |
 | Rules | [RULE.md](RULE.md) | Development and usage rules |
 | LoadingSaving | [LoadingSaving.md](LoadingSaving.md) | File load/save, byte buffers, metadata |
-| Codecs | [Codecs.md](Codecs.md) | Pure-Rust codecs, PNG 100 percent without third-party code |
+| Codecs | [Codecs.md](Codecs.md) | Pure-Rust codecs: PNG, JPEG, GIF, BMP, ICO, WebP without third-party code |
 | Transform | [Transform.md](Transform.md) | Resize, thumbnails, crop, fit, rotation |
 | Filters | [Filters.md](Filters.md) | Adjustments and combinable filter chains |
 | Composite | [Composite.md](Composite.md) | Layering, tints, CoreText text, masks |
@@ -45,6 +47,9 @@ See [LoadingSaving.md](LoadingSaving.md) for details.
 
 ## Changelog
 
+- 2026-10-03: Pure-Rust WebP codec in `src/codecs/` (VP8 lossy decode, VP8L
+  lossless decode/encode, ALPH alpha, VP8X/ANIM first frame). All six formats
+  now decode and encode without third-party code. See [Codecs.md](Codecs.md).
 - 2026-09-28: Removed the CoreIcon dependency and `TiImage::overlay_sf_symbol`; symbol
   overlays now compose in CoreIcon from `load` + `resize`/`fit` + `tint` + `overlay`,
   so CoreIcon can depend on CoreImage without a cycle. Added `Rgba` and `FilterType`

@@ -1,9 +1,10 @@
 # Codecs
 
 Pure-Rust image codecs in `src/codecs/`. Each file extension maps to
-one codec module. PNG, JPEG, GIF, BMP and ICO are fully implemented
-with no third-party dependencies; only WebP still routes through the
-`image` crate until `webp.rs` lands.
+one codec module. PNG, JPEG, GIF, BMP, ICO and WebP are fully implemented
+with no third-party dependencies: every format decodes and encodes from
+`crate::codecs`, the `image` crate is only reached for raster operations
+and pixel buffer types, never for file I/O.
 
 ## PNG (`codecs::png`)
 
@@ -230,6 +231,77 @@ against the `image` crate and Pillow fixtures in `tests/data/` are
 bit-exact. LZW code-size widening follows the asymmetric rule the
 format requires (encoder widens past `2^size`, decoder at `2^size`;
 see `lzw_encode` / `lzw_decode`).
+
+## WebP (`codecs::webp`)
+
+RIFF/WebP codec in `src/codecs/webp.rs` with the VP8 coefficient tables in
+`src/codecs/webp_vp8_tables.rs`. Pure Rust: VP8 lossy decode, VP8L lossless
+decode/encode, alpha and container parsing without third-party code.
+
+### Decode scope
+
+| Capability | Status |
+|---|---|
+| Simple containers `VP8 ` and `VP8L` | Supported |
+| Extended container `VP8X` | Supported, canvas size wins over frame size |
+| Metadata chunks `ICCP`, `EXIF`, `XMP `, `ANIM` | Skipped |
+| Lossy `VP8 ` key frames | Supported, full bool decoder plus reconstruction |
+| `ALPH` alpha plane | Supported, applied to the lossy RGB result |
+| Lossless `VP8L` | Supported: Huffman, LZ77, color cache, transforms, meta prefix codes |
+| Animation `ANIM`/`ANMF` | First frame only, composited onto the canvas |
+| Inter frames inside `ANMF` | `Unsupported` (thumbnail semantics) |
+| Lossy encode | Not implemented, encode is lossless only |
+| `dimensions` probe | Works for every container, no pixel decode |
+
+### Encode scope
+
+| Capability | Status |
+|---|---|
+| Output | Lossless `VP8L` in a simple `RIFF` container |
+| Compression | Canonical Huffman books per channel, no transforms, no color cache |
+| Alpha | Taken from the RGBA buffer, `has_alpha` flag set when needed |
+| `quality` | Validated (1-100) for API parity, does not change lossless output |
+| Limits | 16384 px per side, exact `width * height * 4` buffer length |
+
+### Functions
+
+```rust
+pub fn is_webp(bytes: &[u8]) -> bool
+pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32), WebpError>
+pub fn decode(bytes: &[u8]) -> Result<DecodedWebp, WebpError>
+pub fn encode(width: u32, height: u32, rgba: &[u8], quality: u8) -> Result<Vec<u8>, WebpError>
+```
+
+`decode` always returns RGBA8 pixels and returns `Err` when the RIFF
+container, chunk lengths, VP8/VP8L headers, Huffman trees, transforms,
+partition or token data are invalid. `encode` returns `Err` when the
+dimensions are 0 or above 16384, the buffer length mismatches or
+`quality` is outside 1-100.
+
+### `WebpError`
+
+```rust
+pub enum WebpError {
+  Decode(String),
+  Encode(String),
+  Unsupported(String),
+}
+```
+
+`crate::io` maps `Unsupported` to `ImageError::Unsupported`, so
+inter-frame and unknown-chunk files surface as a localized
+`err_unsupported` error.
+
+### Usage / Example
+
+```rust
+use coreimage::codecs::webp;
+
+let bytes = std::fs::read("photo.webp")?;
+assert_eq!(webp::dimensions(&bytes)?, (w, h));
+let img = webp::decode(&bytes)?;
+let out = webp::encode(img.width, img.height, &img.pixels, 100)?;
+```
 
 ## Adding a codec
 

@@ -4,13 +4,13 @@ Image loading, transform, filter, composite and analysis for TontooOS.
 Text watermarks resolve fonts through CoreText.
 
 40+ functions: PNG (100 percent pure Rust), JPEG (baseline sequential,
-pure Rust), GIF (single frame, pure Rust), BMP (incl. RLE, pure Rust)
-and ICO (PNG + BMP entries, pure Rust) plus WebP load
-and save with quality, byte buffers,
+pure Rust), GIF (single frame, pure Rust), BMP (incl. RLE, pure Rust),
+ICO (PNG + BMP entries, pure Rust) and WebP (VP8 lossy plus VP8L
+lossless, pure Rust) with quality, byte buffers,
 EXIF metadata, thumbnails, crop, fit modes, rotation, mirroring, brightness,
 contrast, saturation, sharpen, white balance, grayscale, sepia, invert, blur,
 filter chains, blend modes, watermarks, masks, rounded corners, colorspaces,
-dominant color and histograms. More pure-Rust codecs land in `src/codecs/`.
+dominant color and histograms. All file codecs live in `src/codecs/`.
 
 ## Made for TontooOS
 
