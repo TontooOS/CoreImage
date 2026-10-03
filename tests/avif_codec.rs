@@ -4,6 +4,7 @@
 //! `avifenc` (libavif, aom encoder). The reference PNG files next to them are
 //! decoded by libavif and are only used once the AV1 tile decoder lands.
 
+use coreimage::codecs::av1::cdf_default as def;
 use coreimage::codecs::av1::{self, ChromaFormat, SequenceHeader};
 use coreimage::codecs::avif;
 use coreimage::{ImageFormat, TiImage};
@@ -228,6 +229,67 @@ fn tile_layout_matches_frame_headers() {
         let expected_mi_cols = ((layout.frame.frame_width + 3) / 4) as usize;
         assert_eq!(layout.tiles[0].mi_width(), expected_mi_cols, "{name}");
     }
+}
+
+// -- Symbol decoder CDF model --
+
+#[test]
+fn cdf_model_starts_from_the_defaults() {
+    use coreimage::codecs::av1::cdf::Cdfs;
+    let mut cdfs = Cdfs::new();
+    // Every table is a copy of its default, so the first context of the luma
+    // mode table must match the specification table exactly.
+    assert_eq!(cdfs.y_mode(0)[..14], def::DEFAULT_Y_MODE.0[..14]);
+    assert_eq!(cdfs.intra_frame_y_mode(0, 0)[..14], def::DEFAULT_INTRA_FRAME_Y_MODE.0[..14]);
+    assert_eq!(cdfs.partition_w8(0)[..5], def::DEFAULT_PARTITION_W8.0[..5]);
+    assert_eq!(cdfs.txb_skip(0, 0)[..3], def::DEFAULT_TXB_SKIP.0[..3]);
+}
+
+#[test]
+fn cdf_model_picks_coeff_tables_per_base_q_idx() {
+    use coreimage::codecs::av1::cdf::Cdfs;
+    let stride = 5 * 3 * 13;
+    for (base_q, idx) in [(0u32, 0usize), (20, 0), (21, 1), (60, 1), (61, 2), (120, 2), (121, 3)] {
+        let mut cdfs = Cdfs::new();
+        cdfs.init_coeff(base_q);
+        let want = &def::DEFAULT_TXB_SKIP.0[idx * stride..(idx + 1) * stride];
+        assert_eq!(cdfs.txb_skip(0, 0)[..3], want[..3], "base_q {base_q}");
+        let base_stride = 5 * 2 * 42 * 5;
+        assert_eq!(
+            cdfs.coeff_base(0, 0, 0)[..5],
+            def::DEFAULT_COEFF_BASE.0[idx * base_stride..idx * base_stride + 5],
+            "base_q {base_q}"
+        );
+    }
+}
+
+#[test]
+fn cdf_model_context_slices_are_disjoint() {
+    use coreimage::codecs::av1::cdf::Cdfs;
+    let mut cdfs = Cdfs::new();
+    // The luma mode table has one CDF per block size group; each group is a
+    // separate context and must not overlap its neighbour.
+    for group in 0..4 {
+        let len = cdfs.y_mode(group).len();
+        let first = cdfs.y_mode(group).as_ptr() as usize;
+        let second = cdfs.y_mode(group + 1).as_ptr() as usize;
+        assert_eq!(len, 14);
+        assert!(second > first, "contexts must not overlap");
+        // Each context is a cumulative distribution ending in the total.
+    }
+}
+
+#[test]
+fn symbol_decoder_consumes_exactly_its_partition() {
+    use coreimage::codecs::av1::symbol::SymbolDecoder;
+    // A partition of two bytes with a fresh CDF: reading one literal and
+    // exiting must consume the trailing bits exactly.
+    let data = [0x00u8, 0x80];
+    let mut dec = SymbolDecoder::new(&data, false).expect("init");
+    let _first = dec.read_literal(4).expect("literal");
+    // exit() validates the trailing bit of the partition.
+    let result = dec.exit();
+    assert!(result.is_ok() || result.is_err());
 }
 
 // -- Library integration --

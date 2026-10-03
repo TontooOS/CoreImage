@@ -1,6 +1,7 @@
 //! OBU framing, sequence header parsing and the AV1 decoder entry points.
 
 pub mod bit;
+pub mod cdf;
 pub mod cdf_default;
 pub mod spec_consts;
 pub mod symbol;
