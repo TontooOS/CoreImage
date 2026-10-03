@@ -178,6 +178,58 @@ fn frame_header_reports_loop_filters() {
     assert_eq!(frame.uses_lr, seq.enable_restoration && !frame.all_lossless);
 }
 
+#[test]
+fn tile_layout_covers_every_tile() {
+    // One tile per frame, sized from the OBU payload.
+    let bytes = data("avif_420_q60.avif");
+    let layout = avif::tile_layout(&bytes).expect("tile layout");
+    assert_eq!(layout.tile_count(), 1);
+    assert_eq!((layout.frame.tile_cols, layout.frame.tile_rows), (1, 1));
+    let tile = &layout.tiles[0];
+    assert_eq!((tile.row, tile.col), (0, 0));
+    assert_eq!(tile.mi_row_start, 0);
+    assert_eq!(tile.mi_row_end, layout.frame.mi_rows);
+    assert_eq!(tile.mi_col_start, 0);
+    assert_eq!(tile.mi_col_end, layout.frame.mi_cols);
+    assert!(tile.size > 0, "tile carries entropy coded data");
+    assert_eq!(layout.coded_bytes(), tile.size);
+}
+
+#[test]
+fn tile_layout_splits_two_tile_columns() {
+    // 96x64 allows two tile columns and one tile row.
+    let bytes = data("avif_tiles.avif");
+    let layout = avif::tile_layout(&bytes).expect("tile layout");
+    assert_eq!(layout.tile_count(), 2);
+    assert!(layout.frame.tile_size_bytes >= 1);
+    let first = &layout.tiles[0];
+    let second = &layout.tiles[1];
+    assert_eq!((first.row, first.col), (0, 0));
+    assert_eq!((second.row, second.col), (0, 1));
+    assert_eq!(first.mi_col_end, second.mi_col_start);
+    assert_eq!(first.mi_rows_range(), layout.frame.mi_rows);
+    assert!(first.size > 0 && second.size > 0, "both tiles carry data");
+    // Tile bytes never overlap and stay inside the OBU payload.
+    assert_eq!(first.offset + first.size, second.offset);
+}
+
+#[test]
+fn tile_layout_matches_frame_headers() {
+    for name in [
+        "avif_444_q70.avif",
+        "avif_422_q70.avif",
+        "avif_odd_37x23.avif",
+        "avif_edge_q80.avif",
+        "avif_mono_q70.avif",
+    ] {
+        let bytes = data(name);
+        let layout = avif::tile_layout(&bytes).expect(name);
+        assert_eq!(layout.tile_count(), layout.frame.tile_cols * layout.frame.tile_rows, "{name}");
+        let expected_mi_cols = ((layout.frame.frame_width + 3) / 4) as usize;
+        assert_eq!(layout.tiles[0].mi_width(), expected_mi_cols, "{name}");
+    }
+}
+
 // -- Library integration --
 
 #[test]

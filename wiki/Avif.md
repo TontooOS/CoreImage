@@ -17,6 +17,7 @@ AV1 decoder stands.
 | `ispe`, `pixi`, `av1C`, `colr`, `auxC` properties | Parsed natively |
 | AV1 OBU framing and `sequence_header_obu( )` | Parsed natively |
 | AV1 `frame_header_obu( )` for intra still frames | Parsed natively |
+| `frame_obu( )` and `tile_group_obu( )` headers, tile byte ranges | Parsed natively |
 | Tile level entropy decoding (`decode_tile`, modes, residual) | Not implemented |
 | Pixel reconstruction (prediction, transforms, filters) | Not implemented |
 | Encoding | Not implemented |
@@ -104,6 +105,34 @@ pub fn aux_payload(bytes: &[u8], item: u32) -> Result<DecodedAvif, AvifError>
 Alpha payload of the alpha auxiliary item as RGBA8 grey pixels. Same limitation
 as [`avif::decode`](#avifdecode).
 
+### `avif::tile_layout`
+
+```rust
+pub fn tile_layout(bytes: &[u8]) -> Result<av1::TileLayout, AvifError>
+```
+
+Tile layout of the primary image item without decoding pixels. Handles
+`OBU_FRAME` (frame header plus one tile group) and separate `OBU_TILE_GROUP`
+OBUs. Returns `Err` when the stream has no sequence header, no frame header or
+no tile data.
+
+| Field | Type | Description |
+|---|---|---|
+| `sequence` | `SequenceHeader` | Parsed sequence header |
+| `frame` | `FrameHeader` | Parsed intra frame header |
+| `tiles` | `Vec<TileInfo>` | Every tile with its byte range and mode info range |
+
+`TileInfo` carries `num`, `row`, `col`, `size` (entropy coded bytes), `offset`
+(inside the tile group OBU payload) and the mode info bounds `mi_row_start`,
+`mi_row_end`, `mi_col_start`, `mi_col_end`, plus the `mi_width`, `mi_height`,
+`row_start` and `col_start` helpers.
+
+The tile ranges are validated against the byte alignment of the frame header:
+the padding bits after an `OBU_FRAME` frame header must be zero, which catches
+any drift in the header parse. That check is what pinned down the
+`force_integer_mv` bit of `uncompressed_header( )`, which is present whenever
+`allow_screen_content_tools` is set even though intra frames force it to 1.
+
 ## AV1 module
 
 `coreimage::codecs::av1` implements the bitstream side. It is public so callers
@@ -114,6 +143,7 @@ can work with the parsed headers directly.
 | `av1::parse_sequence_header(obus)` | Sequence header of an OBU stream, without touching the frame |
 | `av1::parse_headers(obus)` | Sequence and frame headers of a coded still image |
 | `av1::split_obus(obus)` | Splits a stream into OBUs with their payloads |
+| `av1::tile_layout(obus)` | Headers plus the tile byte ranges of a coded still image |
 | `av1::decode_tiles()` | Placeholder for the tile level entropy decoder |
 
 `av1::parse_headers` returns a `Headers` struct with the `SequenceHeader` and an
@@ -198,14 +228,18 @@ The remaining work is the tile level decoder, in this order:
 
 1. `cdf.rs`: the per tile CDF model and `init_coeff_cdfs( )`.
 2. `decode_tile`: partition tree, `mode_info( )`, transform tree, coefficients.
+   Each tile starts at `TileInfo::offset` with `TileInfo::size` bytes, which
+   `init_symbol( size )` consumes directly.
 3. Intra prediction: directional, smooth, palette, intrabc, filter intra, CFL
    and the intra edge filter.
 4. Inverse transforms: DCT, ADST, identity, Hadamard and the flip variants.
 5. Loop filters: deblocking, CDEF, loop restoration and film grain.
 6. Colour conversion and chroma upsampling in `yuv.rs`.
 
-Reference decoders for differential checks: `avifdec`, `dav1d --muxer yuv` and
-`aomdec` from libavif and libaom.
+Reference decoders for differential checks: `avifdec` (raw `y4m` planes),
+`dav1d --muxer yuv` and `aomdec` from libavif and libaom. Comparing our planes
+against the reference planes isolates entropy decoding bugs from filter bugs:
+a wrong block mode garbles a whole block, a wrong filter shifts a few pixels.
 
 ## Cross References
 

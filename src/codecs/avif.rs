@@ -730,6 +730,12 @@ pub fn item_obus(bytes: &[u8]) -> Result<Vec<u8>, AvifError> {
     concatenated_obus(&table, item, payload)
 }
 
+/// Tile layout of the primary image item.
+pub fn tile_layout(bytes: &[u8]) -> Result<av1::TileLayout, AvifError> {
+    let obus = item_obus(bytes)?;
+    Ok(av1::tile_layout(&obus)?)
+}
+
 /// Decode the primary image item of an AVIF file into RGBA8 pixels.
 pub fn decode(bytes: &[u8]) -> Result<DecodedAvif, AvifError> {
     let meta = find_box(bytes, 0, bytes.len(), b"meta")

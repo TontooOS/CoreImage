@@ -11,6 +11,7 @@ mod frame;
 
 pub use frame::FilmGrainParams;
 pub use frame::FrameHeader;
+pub use frame::TileInfo;
 
 use bit::BitReader;
 
@@ -503,6 +504,68 @@ fn finish_headers(
 ) -> Result<Headers, Av1Error> {
     let sequence = sequence.ok_or_else(|| err("no sequence header"))?;
     Ok(Headers { sequence, frame })
+}
+
+/// Tile layout of a coded still image: the headers plus every tile with its
+/// byte range and mode info range.
+pub struct TileLayout {
+    pub sequence: SequenceHeader,
+    pub frame: FrameHeader,
+    pub tiles: Vec<TileInfo>,
+}
+
+impl TileLayout {
+    /// Number of tiles in the frame.
+    pub fn tile_count(&self) -> usize {
+        self.tiles.len()
+    }
+
+    /// Total entropy coded bytes of all tiles.
+    pub fn coded_bytes(&self) -> usize {
+        self.tiles.iter().map(|t| t.size).sum()
+    }
+}
+
+/// Parse the tile layout of a coded still image without decoding pixels.
+///
+/// Handles `OBU_FRAME` (frame header plus one tile group) and separate
+/// `OBU_TILE_GROUP` OBUs, which is what AVIF containers and elementary streams
+/// use.
+pub fn tile_layout(obus: &[u8]) -> Result<TileLayout, Av1Error> {
+    let parsed = split_obus(obus)?;
+    let mut sequence: Option<SequenceHeader> = None;
+    let mut frame: Option<FrameHeader> = None;
+    let mut tiles: Vec<TileInfo> = Vec::new();
+    for obu in &parsed {
+        match obu.kind {
+            OBU_SEQUENCE_HEADER => {
+                let mut r = BitReader::new(obu.payload);
+                sequence = Some(sequence_header_obu(&mut r)?);
+            }
+            OBU_FRAME => {
+                let seq = sequence
+                    .as_ref()
+                    .ok_or_else(|| err("frame OBU before sequence header"))?;
+                let mut header = frame.take().unwrap_or_default();
+                let (_header_bytes, group) = frame::frame_obu(obu.payload, &mut header, seq)?;
+                tiles.extend(group);
+                frame = Some(header);
+            }
+            OBU_TILE_GROUP => {
+                let header = frame
+                    .as_ref()
+                    .ok_or_else(|| err("tile group before frame header"))?;
+                tiles.extend(frame::tile_group_obu(obu.payload, 0, header)?);
+            }
+            _ => {}
+        }
+    }
+    let sequence = sequence.ok_or_else(|| err("no sequence header"))?;
+    let frame = frame.ok_or_else(|| err("no frame header"))?;
+    if tiles.is_empty() {
+        return Err(err("no tile data"));
+    }
+    Ok(TileLayout { sequence, frame, tiles })
 }
 
 /// Decode an AV1 still image from a stream of OBUs.

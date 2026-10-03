@@ -1,4 +1,4 @@
-//! AV1 frame header parsing for still images.
+//! AV1 frame header and tile group parsing for still images.
 //!
 //! Only intra frames are decoded, so the inter frame branches of
 //! `uncompressed_header( )` are reported as `Unsupported` instead of being
@@ -15,6 +15,51 @@ fn err(m: impl Into<String>) -> Av1Error {
 
 fn unsupported(m: impl Into<String>) -> Av1Error {
     Av1Error::Unsupported(m.into())
+}
+
+/// One tile of a tile group: its byte range inside the OBU payload and the
+/// mode info range it covers.
+#[derive(Debug, Clone)]
+pub struct TileInfo {
+    /// Tile number inside the frame, row major.
+    pub num: usize,
+    pub row: usize,
+    pub col: usize,
+    /// Entropy coded payload size in bytes.
+    pub size: usize,
+    /// Offset of the payload inside the tile group OBU payload.
+    pub offset: usize,
+    pub mi_row_start: usize,
+    pub mi_row_end: usize,
+    pub mi_col_start: usize,
+    pub mi_col_end: usize,
+}
+
+impl TileInfo {
+    /// Width of the tile in mode info units.
+    pub fn mi_width(&self) -> usize {
+        self.mi_col_end - self.mi_col_start
+    }
+
+    /// Height of the tile in mode info units.
+    pub fn mi_height(&self) -> usize {
+        self.mi_rows_range()
+    }
+
+    /// Height of the tile in mode info units.
+    pub fn mi_rows_range(&self) -> usize {
+        self.mi_row_end - self.mi_row_start
+    }
+
+    /// First luma sample row of the tile.
+    pub fn row_start(&self) -> u32 {
+        (self.mi_row_start * 4) as u32
+    }
+
+    /// First luma sample column of the tile.
+    pub fn col_start(&self) -> u32 {
+        (self.mi_col_start * 4) as u32
+    }
 }
 
 /// `uncompressed_header( )` for key and intra-only frames.
@@ -201,10 +246,10 @@ fn uncompressed_header(
     }
     if fh.allow_screen_content_tools {
         if seq.seq_force_integer_mv == 2 {
-            // read above, nothing else to do
+            let _force_integer_mv = r.f(1)?;
         }
     }
-    // force_integer_mv is always 1 for intra frames.
+    // Intra frames always use integer motion vectors.
     fh.force_integer_mv = true;
     if seq.frame_id_numbers_present_flag {
         let _current_frame_id = r.f(
@@ -220,9 +265,6 @@ fn uncompressed_header(
         fh.order_hint = r.f(seq.order_hint_bits as u32)?;
     }
     fh.primary_ref_frame = PRIMARY_REF_NONE;
-    // Inter frame bits that precede the frame size are skipped by rejecting
-    // inter frames above, so nothing else is read here.
-    let _decoder_model_info_present_flag = false;
     fh.refresh_frame_flags = if fh.frame_type == KEY_FRAME && fh.show_frame {
         0xff
     } else {
@@ -313,7 +355,7 @@ fn uncompressed_header(
     // Lossless flags depend on every segment's qindex.
     fh.coded_lossless = true;
     for segment_id in 0..tables::MAX_SEGMENTS {
-        let qindex = get_qindex(true, segment_id, &fh, seq);
+        let qindex = get_qindex(true, segment_id, &fh);
         let lossless = qindex == 0
             && fh.delta_q_y_dc == 0
             && fh.delta_q_u_ac == 0
@@ -367,6 +409,7 @@ fn read_delta_q(r: &mut BitReader<'_>) -> Result<i32, Av1Error> {
     }
 }
 
+/// `tile_info( )`.
 fn tile_info(
     r: &mut BitReader<'_>,
     seq: &SequenceHeader,
@@ -477,7 +520,6 @@ fn tile_info(
         fh.tile_size_bytes = r.f(2)? + 1;
     } else {
         fh.context_update_tile_id = 0;
-        fh.tile_size_bytes = 0;
     }
     Ok(())
 }
@@ -529,12 +571,7 @@ fn segmentation_params(r: &mut BitReader<'_>, fh: &mut FrameHeader) -> Result<()
 }
 
 /// `get_qindex( ignoreDeltaQ, segmentId )`.
-pub fn get_qindex(
-    ignore_delta_q: bool,
-    segment_id: usize,
-    fh: &FrameHeader,
-    seq: &SequenceHeader,
-) -> u32 {
+pub fn get_qindex(ignore_delta_q: bool, segment_id: usize, fh: &FrameHeader) -> u32 {
     if fh.segmentation_enabled && fh.feature_enabled[segment_id][tables::SEG_LVL_ALT_Q] {
         let data = fh.feature_data[segment_id][tables::SEG_LVL_ALT_Q];
         let qindex = fh.base_q_idx as i64 + data as i64;
@@ -758,4 +795,83 @@ fn film_grain_params(
         fg.cr_offset = r.f(9)?;
     }
     Ok(Some(fg))
+}
+
+/// `frame_obu( sz )`: the frame header followed by one tile group.
+///
+/// Returns the byte length of the frame header inside the payload and the tiles.
+pub fn frame_obu(
+    payload: &[u8],
+    header: &mut FrameHeader,
+    seq: &SequenceHeader,
+) -> Result<(usize, Vec<TileInfo>), Av1Error> {
+    let mut r = BitReader::new(payload);
+    let start = r.position();
+    let parsed = frame_header_obu(&mut r, seq)?;
+    *header = parsed;
+    r.byte_align()?;
+    let header_bytes = (r.position() - start) / 8;
+    let tiles = tile_group_obu(payload, header_bytes, header)?;
+    Ok((header_bytes, tiles))
+}
+
+/// `tile_group_obu( sz )` up to the start of the entropy coded tile data.
+///
+/// `offset` is the byte position of the tile group inside the OBU payload, so
+/// the returned tile offsets stay relative to the OBU.
+pub fn tile_group_obu(
+    payload: &[u8],
+    offset: usize,
+    fh: &FrameHeader,
+) -> Result<Vec<TileInfo>, Av1Error> {
+    let num_tiles = fh.tile_cols * fh.tile_rows;
+    if num_tiles == 0 {
+        return Err(err("frame header without tiles"));
+    }
+    let mut r = BitReader::new(payload);
+    r.set_position(offset * 8);
+    let start = r.position();
+    let present = if num_tiles > 1 { r.flag()? } else { false };
+    let (tg_start, tg_end) = if num_tiles == 1 || !present {
+        (0usize, num_tiles - 1)
+    } else {
+        let bits = fh.tile_cols_log2 as u32 + fh.tile_rows_log2 as u32;
+        (r.f(bits)? as usize, r.f(bits)? as usize)
+    };
+    if tg_end >= num_tiles || tg_start > tg_end {
+        return Err(err("tile group range outside the tile grid"));
+    }
+    r.byte_align()?;
+    let header_bytes = (r.position() - start) / 8;
+    let mut pos = offset + header_bytes;
+    let mut tiles = Vec::with_capacity(tg_end - tg_start + 1);
+    for tile_num in tg_start..=tg_end {
+        let last = tile_num == tg_end;
+        let size = if last {
+            payload.len() - pos
+        } else {
+            if fh.tile_size_bytes == 0 {
+                return Err(err("tiled frame without tile_size_bytes"));
+            }
+            let size_minus_1 = r.le(fh.tile_size_bytes)? as usize;
+            pos += fh.tile_size_bytes as usize;
+            size_minus_1 + 1
+        };
+        let row = tile_num / fh.tile_cols;
+        let col = tile_num % fh.tile_cols;
+        let tile = TileInfo {
+            num: tile_num,
+            row,
+            col,
+            size,
+            offset: pos,
+            mi_row_start: fh.mi_row_starts.get(row).copied().unwrap_or(0),
+            mi_row_end: fh.mi_row_starts.get(row + 1).copied().unwrap_or(0),
+            mi_col_start: fh.mi_col_starts.get(col).copied().unwrap_or(0),
+            mi_col_end: fh.mi_col_starts.get(col + 1).copied().unwrap_or(0),
+        };
+        pos += size;
+        tiles.push(tile);
+    }
+    Ok(tiles)
 }

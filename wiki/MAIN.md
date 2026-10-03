@@ -49,6 +49,11 @@ See [LoadingSaving.md](LoadingSaving.md) for details.
 
 ## Changelog
 
+- 2026-10-03: AV1 tile group headers: rame_obu( ) and 	ile_group_obu( )
+  with the tile byte ranges and mode info bounds exposed through
+  v1::tile_layout. The byte alignment check of the frame header pinned
+  down the orce_integer_mv bit of uncompressed_header( ).
+  See [Avif.md](Avif.md).
 - 2026-10-03: Native AVIF support without the `image` crate: ISOBMFF container
   (`meta`, `iinf`, `iloc`, `iprp`, `iref`, `av1C`, `ispe`, `pixi`, `colr`, `auxC`),
   AV1 OBU framing, sequence header and intra frame header, plus
